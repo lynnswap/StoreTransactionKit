@@ -1,0 +1,94 @@
+name: Documentation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Package.swift
+      - Sources/**
+      - .github/workflows/documentation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: documentation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-documentation:
+    name: Build and Deploy DocC
+    runs-on: macos-26
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      XCODE_MAJOR: "26"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Verify GitHub Actions pinning
+        run: ruby scripts/verify-github-actions-pinning.rb
+
+      - name: Resolve latest stable Xcode
+        run: |
+          xcode_app="$(ruby <<'RUBY'
+          xcode_major = ENV.fetch("XCODE_MAJOR")
+          candidates = Dir["/Applications/Xcode_#{xcode_major}*.app"].select { |path| File.directory?(path) }
+          candidates = candidates.reject do |path|
+            labels = [path, File.realpath(path)].map { |candidate| File.basename(candidate).downcase }
+            labels.any? { |label| label.match?(/beta|release[ _-]?candidate|(?:^|[_. -])rc(?:$|[_. -])/) }
+          end
+          selected = candidates.max_by do |path|
+            File.basename(path)[/Xcode_(\d+(?:\.\d+)*)/, 1].to_s.split(".").map(&:to_i)
+          end
+          abort("No stable Xcode #{xcode_major} installation found") unless selected
+          puts selected
+          RUBY
+          )"
+          echo "DEVELOPER_DIR=${xcode_app}/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Resolved Xcode: ${xcode_app}"
+
+      - name: Configure GitHub Pages
+        id: pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Build DocC archive
+        env:
+          PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+        run: |
+          set -euo pipefail
+          xcodebuild docbuild \
+            -scheme StoreTransactionKit \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath .build/docc
+
+          archive_path="$(find .build/docc -name 'StoreTransactionKit.doccarchive' -print -quit)"
+          if [[ -z "${archive_path}" ]]; then
+            echo "StoreTransactionKit.doccarchive was not produced." >&2
+            exit 1
+          fi
+
+          xcrun docc process-archive transform-for-static-hosting \
+            "${archive_path}" \
+            --output-path .build/documentation-site \
+            --hosting-base-path "${PAGES_BASE_PATH}"
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: .build/documentation-site
+
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

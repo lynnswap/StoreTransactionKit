@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-tests:
+    name: Package Tests (macOS)
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      XCODE_MAJOR: "26"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Verify GitHub Actions pinning
+        run: ruby scripts/verify-github-actions-pinning.rb
+
+      - name: Resolve latest stable Xcode
+        run: |
+          xcode_app="$(ruby <<'RUBY'
+          xcode_major = ENV.fetch("XCODE_MAJOR")
+          candidates = Dir["/Applications/Xcode_#{xcode_major}*.app"].select { |path| File.directory?(path) }
+
+          def pre_release_xcode_path?(path)
+            labels = [path, File.realpath(path)].map { |candidate| File.basename(candidate).downcase }
+            labels.any? do |label|
+              label.match?(/beta|release[ _-]?candidate|(?:^|[_. -])rc(?:$|[_. -])/)
+            end
+          end
+
+          candidates = candidates.reject { |path| pre_release_xcode_path?(path) }
+          selected = candidates.max_by do |path|
+            File.basename(path)[/Xcode_(\d+(?:\.\d+)*)/, 1].to_s.split(".").map(&:to_i)
+          end
+          abort("No stable Xcode #{xcode_major} installation found") unless selected
+          puts selected
+          RUBY
+          )"
+          echo "DEVELOPER_DIR=${xcode_app}/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Resolved Xcode: ${xcode_app}"
+
+      - name: Show Xcode environment
+        run: |
+          xcodebuild -version
+          swift --version
+          xcodebuild -showsdks
+
+      - name: Lint Swift formatting
+        run: xcrun swift-format lint --recursive --strict Sources Tests Package.swift
+
+      - name: Run Swift package tests
+        run: swift test --build-system swiftbuild --no-parallel
+
+      - name: Build release configuration
+        run: swift build --build-system swiftbuild --configuration release
+
+      - name: Build for iOS Simulator
+        run: |
+          xcodebuild build \
+            -scheme StoreTransactionKit \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Build DocC archive
+        run: |
+          xcodebuild docbuild \
+            -scheme StoreTransactionKit \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath .build/docc-ci
+
+      - name: Build external consumer fixture
+        working-directory: Fixtures/ExternalConsumer
+        run: |
+          swift package resolve
+          swift package show-dependencies --format json > dependency-graph.json
+          if grep -Eiq 'TweetPDKit|GoogleMobileAds|UserMessagingPlatform|PDObfuscatePlugin' dependency-graph.json; then
+            echo "External consumer resolved an app-only dependency." >&2
+            exit 1
+          fi
+          swift build --build-system swiftbuild
+
+  ios-tests:
+    name: Package Tests (iOS Simulator)
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      XCODE_MAJOR: "26"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Resolve latest stable Xcode
+        run: |
+          xcode_app="$(ruby <<'RUBY'
+          xcode_major = ENV.fetch("XCODE_MAJOR")
+          candidates = Dir["/Applications/Xcode_#{xcode_major}*.app"].select { |path| File.directory?(path) }
+          candidates = candidates.reject do |path|
+            labels = [path, File.realpath(path)].map { |candidate| File.basename(candidate).downcase }
+            labels.any? { |label| label.match?(/beta|release[ _-]?candidate|(?:^|[_. -])rc(?:$|[_. -])/) }
+          end
+          selected = candidates.max_by do |path|
+            File.basename(path)[/Xcode_(\d+(?:\.\d+)*)/, 1].to_s.split(".").map(&:to_i)
+          end
+          abort("No stable Xcode #{xcode_major} installation found") unless selected
+          puts selected
+          RUBY
+          )"
+          echo "DEVELOPER_DIR=${xcode_app}/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Resolved Xcode: ${xcode_app}"
+
+      - name: Select iOS Simulator
+        run: |
+          simulator_id="$(xcrun simctl list devices available --json | ruby -rjson -e '
+            runtimes = JSON.parse(STDIN.read).fetch("devices").select { |name, _| name.include?(".iOS-") }
+            _, devices = runtimes.max_by { |name, _| name.scan(/\d+/).map(&:to_i) }
+            abort("No available iOS runtime found") unless devices
+            device = devices.find { |candidate| candidate["isAvailable"] && candidate["name"].start_with?("iPhone") }
+            abort("No available iPhone Simulator found") unless device
+            puts device.fetch("udid")
+          ')"
+          echo "SIMULATOR_ID=${simulator_id}" >> "$GITHUB_ENV"
+
+      - name: Run iOS Simulator tests
+        run: |
+          xcodebuild test \
+            -scheme StoreTransactionKit \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_ID}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO

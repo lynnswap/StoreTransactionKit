@@ -1,0 +1,103 @@
+import Foundation
+
+/// A store operation that can appear in lifecycle and diagnostic errors.
+public enum StoreTransactionOperation: Sendable {
+    /// Processing a direct ``StoreKit/Product/PurchaseResult``.
+    case processPurchase
+
+    /// Refreshing the current entitlement projection.
+    case currentEntitlements
+
+    /// Querying transaction history for one product.
+    case history
+
+    /// Synchronizing purchases and then refreshing entitlements.
+    case restorePurchases
+
+    /// Draining and closing the process-owned session.
+    case close
+}
+
+package enum StoreTransactionCallback: Sendable {
+    case transactionHandler
+    case entitlementObserver
+    case failureReporter
+}
+
+/// A failure produced by work that has no attached public caller.
+public struct StoreTransactionBackgroundFailure: Error, Sendable {
+    /// The background path that produced the failure.
+    public enum Source: Sendable {
+        /// A delivery from ``StoreKit/Transaction/updates``.
+        case updates
+
+        /// A delivery from ``StoreKit/Transaction/unfinished`` during startup.
+        case unfinished
+
+        /// A refresh requested after background processing completed.
+        case entitlementRefresh
+
+        /// A direct operation whose caller cancelled after the session accepted it.
+        case abandonedDirectOperation(StoreTransactionOperation)
+    }
+
+    /// The background path that produced the failure.
+    public let source: Source
+
+    /// The verified transaction identifier, when verification reached a transaction snapshot.
+    public let transactionID: UInt64?
+
+    /// The verified product identifier, when verification reached a transaction snapshot.
+    public let productID: String?
+
+    /// The error returned by StoreKit or an injected consumer dependency.
+    public let underlyingError: any Error
+
+    package init(
+        source: Source,
+        transactionID: UInt64?,
+        productID: String?,
+        underlyingError: any Error
+    ) {
+        self.source = source
+        self.transactionID = transactionID
+        self.productID = productID
+        self.underlyingError = underlyingError
+    }
+}
+
+/// An error caused by using a store outside its documented lifecycle.
+public enum StoreTransactionError: Error, Sendable {
+    /// The store has begun its shared close operation and accepts no new work.
+    case closing
+
+    /// The store finished closing and cannot restart.
+    case closed
+
+    /// StoreKit returned a purchase result unknown to this framework version.
+    case unknownPurchaseResult
+
+    /// A consumer callback attempted to synchronously reenter its own session.
+    ///
+    /// Reentrancy is rejected because a callback can otherwise wait behind
+    /// itself or attempt to close the dispatcher that is executing it.
+    case reentrantOperation(operation: StoreTransactionOperation)
+}
+
+package enum StoreTransactionLifecycleError: Error, Sendable {
+    case alreadyStarted
+    case notStarted
+}
+
+package struct StoreTransactionVerificationError: LocalizedError, Sendable {
+    package let underlyingError: any Error
+
+    package var errorDescription: String? {
+        underlyingError.localizedDescription
+    }
+}
+
+package enum StoreTransactionInternalError: Error, Sendable {
+    case inputClosed
+    case entitlementRefreshClosed
+}
