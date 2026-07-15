@@ -54,7 +54,9 @@ and `Transaction.updates` monitoring during initialization. Retain one instance
 in the application's process-lifetime composition.
 
 `activeEntitlements` contains the app-defined identifiers represented by
-StoreKit's current entitlements. `entitlements` contains the complete verified
+StoreKit's current entitlements. It is `nil` while the initial entitlement
+query is unresolved and becomes a non-`nil` empty set when no known
+subscription is active. `entitlements` contains the complete verified
 snapshot, including product identifiers outside `SubscriptionID`.
 
 ## Use SubscriptionStoreView
@@ -77,8 +79,12 @@ struct PremiumStoreView: View {
 
     var body: some View {
         VStack {
-            if store.activeEntitlements.contains(.yearly) {
-                Label("Premium active", systemImage: "checkmark.seal.fill")
+            if let activeEntitlements = store.activeEntitlements {
+                if activeEntitlements.contains(.yearly) {
+                    Label("Premium active", systemImage: "checkmark.seal.fill")
+                }
+            } else {
+                ProgressView()
             }
 
             SubscriptionStoreView(

@@ -25,6 +25,7 @@ struct StoreTests {
             reportFailure: { _ in }
         )
 
+        #expect(store.activeEntitlements == nil)
         await store.waitForStartup()
 
         #expect(store.activeEntitlements == [.monthly])
@@ -57,10 +58,12 @@ struct StoreTests {
             reportFailure: { _ in }
         )
 
+        #expect(store.activeEntitlements == nil)
         await query.waitForRequest(1)
         await query.fail(TestFailure())
         await store.waitForStartup()
         #expect(store.entitlements == nil)
+        #expect(store.activeEntitlements == nil)
         #expect(store.startupError != nil)
 
         let refresh = Task { try await store.refreshEntitlements() }
@@ -72,6 +75,22 @@ struct StoreTests {
 
         #expect(store.activeEntitlements == [.yearly])
         #expect(store.startupError == nil)
+        try await store.close()
+    }
+
+    @Test("an empty set means entitlement resolution completed")
+    func emptyTypedEntitlementProjection() async throws {
+        let fixture = TestSourceFixture(currentEntitlements: { [] })
+        fixture.unfinished.finish()
+        let store = Store<SubscriptionID>(
+            source: fixture.source,
+            handleTransaction: { _ in },
+            reportFailure: { _ in }
+        )
+
+        #expect(store.activeEntitlements == nil)
+        await store.waitForStartup()
+        #expect(store.activeEntitlements == Set<SubscriptionID>())
         try await store.close()
     }
 

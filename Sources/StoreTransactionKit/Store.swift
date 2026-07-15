@@ -28,7 +28,18 @@ where
     public private(set) var entitlements: StoreEntitlements?
 
     /// App-defined identifiers represented by the latest current entitlements.
-    public private(set) var activeEntitlements: Set<EntitlementID> = []
+    ///
+    /// The value is `nil` until the first entitlement query succeeds. An empty
+    /// set is non-`nil` and means none of the app-defined identifiers is
+    /// currently entitled.
+    public var activeEntitlements: Set<EntitlementID>? {
+        entitlements.map { entitlements in
+            Set(
+                entitlements.transactions.compactMap {
+                    EntitlementID(rawValue: $0.productID)
+                })
+        }
+    }
 
     /// The error from the initial entitlement query when startup did not reach
     /// readiness.
@@ -156,10 +167,6 @@ where
 
     fileprivate func apply(_ entitlements: StoreEntitlements) {
         self.entitlements = entitlements
-        activeEntitlements = Set(
-            entitlements.transactions.compactMap {
-                EntitlementID(rawValue: $0.productID)
-            })
         startupError = nil
     }
 

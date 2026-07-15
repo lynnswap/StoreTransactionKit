@@ -12,9 +12,12 @@ processor and publishes observable current-entitlement state.
 
 Create one store in the application composition root. Supply an idempotent
 transaction handler that commits the app's business effect before returning.
-The app defines a string-backed entitlement identifier type; ``Store/activeEntitlements``
-then exposes a typed set derived from StoreKit's verified current entitlements.
-Pass direct results from custom purchase UI into ``Store/process(_:)``.
+The app defines a string-backed entitlement identifier type;
+``Store/activeEntitlements`` then exposes an optional typed set derived from
+StoreKit's verified current entitlements. `nil` means the initial entitlement
+query remains unresolved; an empty set means the query completed with no
+matching entitlement. Pass direct results from custom purchase UI into
+``Store/process(_:)``.
 
 The framework owns StoreKit verification, process-local exact-revision
 coalescing, `finish()`, entitlement refresh, history ordering, restore
