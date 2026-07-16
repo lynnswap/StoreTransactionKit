@@ -1,13 +1,6 @@
 name: Documentation
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - Package.swift
-      - Sources/**
-      - .github/workflows/documentation.yml
   workflow_dispatch:
 
 permissions:
