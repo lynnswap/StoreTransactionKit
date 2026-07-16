@@ -17,7 +17,11 @@ struct Consumer {
             }
         )
 
-        print("Active entitlements: \(store.activeEntitlements)")
+        if let activeEntitlements = store.activeEntitlements {
+            print("Active entitlements: \(activeEntitlements)")
+        } else {
+            print("Active entitlements are unresolved")
+        }
         try await store.close()
     }
 }
