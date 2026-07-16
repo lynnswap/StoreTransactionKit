@@ -1,7 +1,17 @@
 import Foundation
 
+package struct EntitlementRefreshReservation: Sendable {
+    package enum Role: Equatable, Sendable {
+        case owner
+        case observer
+    }
+
+    package let receipt: ProcessingReceipt<StoreEntitlements>
+    package let role: Role
+}
+
 package actor EntitlementRefreshCoordinator {
-    private struct Reservation: Sendable {
+    private struct PendingReservation: Sendable {
         let token: UInt64
         let receipt: ProcessingReceipt<StoreEntitlements>
     }
@@ -11,7 +21,7 @@ package actor EntitlementRefreshCoordinator {
     private let didChange: @Sendable (StoreEntitlements) async -> Void
     private var nextToken: UInt64 = 0
     private var current: StoreEntitlements?
-    private var pending: [Reservation] = []
+    private var pending: [PendingReservation] = []
     private var worker: Task<Void, Never>?
     private var acceptsReservations = true
 
@@ -27,16 +37,25 @@ package actor EntitlementRefreshCoordinator {
         self.didChange = didChange
     }
 
-    package func reserve() -> ProcessingReceipt<StoreEntitlements> {
+    package func reserve() -> EntitlementRefreshReservation {
         guard acceptsReservations else {
-            return .failed(StoreTransactionInternalError.entitlementRefreshClosed)
+            return EntitlementRefreshReservation(
+                receipt: .failed(
+                    StoreTransactionInternalError.entitlementRefreshClosed
+                ),
+                role: .owner
+            )
         }
         precondition(nextToken < .max)
         nextToken += 1
+        let role: EntitlementRefreshReservation.Role =
+            pending.isEmpty ? .owner : .observer
         let receipt = ProcessingReceipt<StoreEntitlements>()
-        pending.append(Reservation(token: nextToken, receipt: receipt))
+        pending.append(
+            PendingReservation(token: nextToken, receipt: receipt)
+        )
         startWorkerIfNeeded()
-        return receipt
+        return EntitlementRefreshReservation(receipt: receipt, role: role)
     }
 
     package func sealAndDrain() async {
@@ -48,8 +67,9 @@ package actor EntitlementRefreshCoordinator {
 
     private func startWorkerIfNeeded() {
         guard worker == nil else { return }
-        worker = Task {
-            await runQueries()
+        worker = Task.detached { [weak self] in
+            guard let self else { return }
+            await self.runQueries()
         }
     }
 

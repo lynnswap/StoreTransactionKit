@@ -32,9 +32,10 @@ package actor StoreTransactionSession {
     ///
     /// - Parameters:
     ///   - handleTransaction: Applies the durable business effect for a verified
-    ///     transaction. The handler must be idempotent because StoreKit delivery
-    ///     is at least once. StoreTransactionKit calls `finish()` only after this
-    ///     closure returns successfully.
+    ///     transaction. StoreTransactionKit exposes an at-least-once
+    ///     handler-delivery contract, so the handler must be idempotent.
+    ///     StoreTransactionKit calls `finish()` only after this closure returns
+    ///     successfully.
     ///   - entitlementsDidChange: Receives complete, ordered entitlement
     ///     snapshots when the current entitlement content changes.
     ///   - reportFailure: Receives failures from process-owned work that has no
@@ -82,7 +83,7 @@ package actor StoreTransactionSession {
 
     /// Starts transaction monitoring, reconciles unfinished work, and publishes initial entitlements.
     ///
-    /// Both StoreKit producer tasks are retained before this method first
+    /// All StoreKit producer tasks are retained before this method first
     /// suspends. The method returns only after the startup unfinished sequence,
     /// the initial entitlement query, and any initial entitlement callback have
     /// completed.
@@ -166,7 +167,8 @@ package actor StoreTransactionSession {
     ///
     /// - Parameter productID: The StoreKit product identifier to query.
     /// - Returns: Verified snapshots ordered by purchase date, signed date, and
-    ///   transaction identifier descending, with exact JWS bytes as a final tie breaker.
+    ///   transaction identifier descending, then exact JWS UTF-8 bytes
+    ///   ascending.
     /// - Throws: A StoreKit verification or query error, a lifecycle or callback
     ///   reentrancy error, or `CancellationError` for an abandoned waiter.
     package func history(
@@ -187,7 +189,9 @@ package actor StoreTransactionSession {
     ///
     /// - Returns: The entitlement publication from a query reserved after sync succeeds.
     /// - Throws: A synchronization, verification, query, lifecycle, callback
-    ///   reentrancy, or caller cancellation error.
+    ///   reentrancy, or caller cancellation error. StoreKit may throw
+    ///   ``StoreKit/StoreKitError/userCancelled`` when the user dismisses
+    ///   authentication; callers should treat that as a normal user outcome.
     package func restorePurchases() async throws -> StoreEntitlements {
         let runtime = try runningRuntime(operation: .restorePurchases)
         guard let leases = runtime.beginOperation() else {

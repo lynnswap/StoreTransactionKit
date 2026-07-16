@@ -1,5 +1,16 @@
 import Foundation
 
+package struct ProcessingAcceptance<Value: Sendable>: Sendable {
+    package enum Role: Equatable, Sendable {
+        case owner
+        case inFlightObserver
+        case completedObserver
+    }
+
+    package let receipt: ProcessingReceipt<Value>
+    package let role: Role
+}
+
 package actor TransactionProcessingCore<Value: Sendable> {
     private struct QueuedOperation: Sendable {
         let envelope: ProcessingEnvelope<Value>
@@ -24,22 +35,31 @@ package actor TransactionProcessingCore<Value: Sendable> {
 
     package func accept(
         _ envelope: ProcessingEnvelope<Value>
-    ) -> ProcessingReceipt<Value> {
+    ) -> ProcessingAcceptance<Value> {
         guard acceptsInput else {
-            return .failed(StoreTransactionInternalError.inputClosed)
+            return ProcessingAcceptance(
+                receipt: .failed(StoreTransactionInternalError.inputClosed),
+                role: .owner
+            )
         }
         if completed.contains(envelope.revision) {
-            return .succeeded(envelope.value)
+            return ProcessingAcceptance(
+                receipt: .succeeded(envelope.value),
+                role: .completedObserver
+            )
         }
         if let receipt = inFlight[envelope.revision] {
-            return receipt
+            return ProcessingAcceptance(
+                receipt: receipt,
+                role: .inFlightObserver
+            )
         }
 
         let receipt = ProcessingReceipt<Value>()
         inFlight[envelope.revision] = receipt
         queue.append(QueuedOperation(envelope: envelope, receipt: receipt))
         startWorkerIfNeeded()
-        return receipt
+        return ProcessingAcceptance(receipt: receipt, role: .owner)
     }
 
     package func finishInputAndDrain() async {
@@ -52,8 +72,9 @@ package actor TransactionProcessingCore<Value: Sendable> {
 
     private func startWorkerIfNeeded() {
         guard worker == nil else { return }
-        worker = Task {
-            await drainQueue()
+        worker = Task.detached { [weak self] in
+            guard let self else { return }
+            await self.drainQueue()
         }
     }
 

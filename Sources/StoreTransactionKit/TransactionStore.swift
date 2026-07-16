@@ -7,6 +7,8 @@ import StoreKit
 /// Create one store in the application's process composition root. The store
 /// starts transaction monitoring during initialization and publishes complete
 /// current-entitlement snapshots on the main actor.
+/// Public operations other than ``close()`` wait for the startup attempt,
+/// including durable handling of startup unfinished transactions, to complete.
 ///
 /// `EntitlementID` is an app-defined, string-backed identifier. Values whose
 /// raw values match a current StoreKit entitlement appear in
@@ -15,28 +17,31 @@ import StoreKit
 /// never hidden.
 @MainActor
 @Observable
-public final class Store<EntitlementID>
+public final class TransactionStore<EntitlementID>
 where
     EntitlementID: RawRepresentable & Hashable & Sendable,
     EntitlementID.RawValue == String
 {
-    /// The latest complete current-entitlement projection.
+    /// The latest verified current-entitlement projection.
     ///
     /// The value is `nil` until the first entitlement query succeeds. An empty
     /// projection is non-`nil` and means StoreKit reported no current
-    /// entitlements.
+    /// entitlements. Elements that StoreKit can't verify are omitted and
+    /// reported through the failure callback.
     public private(set) var entitlements: StoreEntitlements?
 
-    /// App-defined identifiers represented by the latest current entitlements.
+    /// App-defined identifiers represented by the latest active entitlements.
     ///
     /// The value is `nil` until the first entitlement query succeeds. An empty
     /// set is non-`nil` and means none of the app-defined identifiers is
-    /// currently entitled.
+    /// currently entitled. Transactions superseded by a subscription upgrade
+    /// remain available through ``entitlements`` but don't appear in this set.
     public var activeEntitlements: Set<EntitlementID>? {
         entitlements.map { entitlements in
             Set(
                 entitlements.transactions.compactMap {
-                    EntitlementID(rawValue: $0.productID)
+                    guard !$0.isUpgraded else { return nil }
+                    return EntitlementID(rawValue: $0.productID)
                 })
         }
     }
@@ -57,11 +62,15 @@ where
     ///
     /// - Parameters:
     ///   - handleTransaction: Applies the durable business effect for a verified
-    ///     transaction. The handler must be idempotent because StoreKit delivery
-    ///     is at least once. StoreTransactionKit calls `finish()` only after the
-    ///     closure returns successfully.
+    ///     transaction. StoreTransactionKit exposes an at-least-once
+    ///     handler-delivery contract, so the handler must be idempotent.
+    ///     StoreTransactionKit calls `finish()` only after the closure returns
+    ///     successfully. The handler must not call back into the same store,
+    ///     directly or through an awaited child task, because doing so creates a
+    ///     dependency cycle with the operation being handled.
     ///   - reportFailure: Receives failures from process-owned transaction work
-    ///     that has no attached public caller.
+    ///     that has no attached public caller. This callback must not call back
+    ///     into the same store, directly or through an awaited child task.
     public convenience init(
         handleTransaction:
             @escaping @Sendable (StoreTransactionSnapshot) async throws -> Void,
@@ -82,7 +91,7 @@ where
         reportFailure:
             @escaping @Sendable (StoreTransactionBackgroundFailure) async -> Void
     ) {
-        let owner = StoreOwner<EntitlementID>()
+        let owner = TransactionStoreOwner<EntitlementID>()
         let sessionID = UUID()
         let startupCompletion = ProcessingReceipt<Void>()
         let transactionSession = StoreTransactionSession(
@@ -103,11 +112,12 @@ where
             defer { startupCompletion.succeed(()) }
             do {
                 _ = try await transactionSession.start()
-            } catch is CancellationError {
+            } catch {
                 // Explicit close cancels only this readiness waiter. The
                 // session's close operation owns draining accepted work.
-            } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, self?.entitlements == nil else {
+                    return
+                }
                 self?.startupError = error
             }
         }
@@ -116,7 +126,7 @@ where
     /// Processes a direct result from custom purchase UI.
     ///
     /// StoreKit views deliver successful purchases through
-    /// ``StoreKit/Transaction/updates`` by default and don't need to call this
+    /// `Transaction.updates` by default and don't need to call this
     /// method. Use it for a result returned directly by a `Product` purchase
     /// API or by a custom StoreKit view completion action.
     public func process(
@@ -136,6 +146,12 @@ where
     }
 
     /// Returns verified transaction history for a product in newest-first order.
+    ///
+    /// StoreKit omits finished consumables unless the app enables
+    /// `SKIncludeConsumableInAppPurchaseHistory` in its information property
+    /// list. Revoked and refunded transactions remain in the returned history.
+    /// Results are ordered by purchase date, signed date, and transaction
+    /// identifier descending, then exact JWS UTF-8 bytes ascending.
     public func history(
         for productID: Product.ID
     ) async throws -> [StoreTransactionSnapshot] {
@@ -146,7 +162,10 @@ where
     /// Synchronizes App Store purchases after an explicit user restore action.
     ///
     /// This method can present authentication UI. It refreshes observable
-    /// entitlement state before returning.
+    /// entitlement state before returning. StoreKit may throw
+    /// ``StoreKit/StoreKitError/userCancelled`` when the user dismisses
+    /// authentication; treat that as a normal user outcome rather than a
+    /// diagnostic failure.
     @discardableResult
     public func restorePurchases() async throws -> StoreEntitlements {
         try await waitForStartupAttempt(operation: .restorePurchases)
@@ -157,6 +176,9 @@ where
     ///
     /// Production apps normally retain the store for process lifetime. Call
     /// this method from controlled shutdown and test lifecycles.
+    ///
+    /// - Throws: ``StoreTransactionError/reentrantOperation(operation:)`` when
+    ///   an injected callback attempts to close the store that is executing it.
     public func close() async throws {
         try rejectReentrancy(operation: .close)
         startupTask?.cancel()
@@ -175,7 +197,11 @@ where
     ) async throws {
         try rejectReentrancy(operation: operation)
         try Task.checkCancellation()
-        try await startupCompletion.value()
+        do {
+            try await startupCompletion.value()
+        } catch is ProcessingReceiptWaiterCancellation {
+            throw CancellationError()
+        }
     }
 
     private func rejectReentrancy(
@@ -198,12 +224,12 @@ where
 }
 
 @MainActor
-private final class StoreOwner<EntitlementID>: Sendable
+private final class TransactionStoreOwner<EntitlementID>: Sendable
 where
     EntitlementID: RawRepresentable & Hashable & Sendable,
     EntitlementID.RawValue == String
 {
-    weak var store: Store<EntitlementID>?
+    weak var store: TransactionStore<EntitlementID>?
 
     func apply(_ entitlements: StoreEntitlements) {
         store?.apply(entitlements)

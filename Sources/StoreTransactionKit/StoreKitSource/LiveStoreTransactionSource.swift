@@ -12,12 +12,32 @@ package extension StoreTransactionSource {
                 await consume(LiveTransactionAdapter.delivery(result))
             }
         },
+        runSubscriptionStatusUpdates: { consume in
+            for await _ in Product.SubscriptionInfo.Status.updates {
+                await consume()
+            }
+        },
         currentEntitlements: {
             var snapshots: [StoreTransactionSnapshot] = []
+            var verificationFailures: [StoreTransactionVerificationError] = []
             for await result in Transaction.currentEntitlements {
-                snapshots.append(try LiveTransactionAdapter.snapshot(result))
+                do {
+                    snapshots.append(try LiveTransactionAdapter.snapshot(result))
+                } catch let error as StoreTransactionVerificationError {
+                    verificationFailures.append(error)
+                }
             }
-            return snapshots
+            return CurrentEntitlementQueryResult(
+                snapshots: snapshots,
+                verificationFailures: verificationFailures
+            )
+        },
+        queryUnfinished: {
+            var deliveries: [StoreTransactionDelivery] = []
+            for await result in Transaction.unfinished {
+                deliveries.append(LiveTransactionAdapter.delivery(result))
+            }
+            return deliveries
         },
         history: { productID in
             var snapshots: [StoreTransactionSnapshot] = []

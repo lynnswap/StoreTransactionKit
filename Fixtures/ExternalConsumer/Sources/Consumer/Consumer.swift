@@ -8,7 +8,7 @@ private enum EntitlementID: String, Hashable, Sendable {
 @MainActor
 struct Consumer {
     static func main() async throws {
-        let store = Store<EntitlementID>(
+        let store = TransactionStore<EntitlementID>(
             handleTransaction: { transaction in
                 print("Handle transaction \(transaction.id)")
             },

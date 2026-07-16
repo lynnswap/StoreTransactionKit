@@ -1,7 +1,7 @@
 import Testing
 @testable import StoreTransactionKit
 
-@Suite("EntitlementRefreshCoordinator")
+@Suite("EntitlementRefreshCoordinator", .timeLimit(.minutes(1)))
 struct EntitlementRefreshCoordinatorTests {
     @Test("reservations that arrive during a query run in the next cycle")
     func cutoffReservations() async throws {
@@ -15,18 +15,18 @@ struct EntitlementRefreshCoordinatorTests {
         )
 
         let first = await coordinator.reserve()
-        await query.waitForRequest(1)
+        try await query.waitForRequest(1)
         let second = await coordinator.reserve()
         await query.succeed([makeSnapshot(id: 1, productID: "b")])
 
-        let firstValue = try await first.terminalValue()
+        let firstValue = try await first.receipt.terminalValue()
         #expect(firstValue.transactions.map(\.productID) == ["b"])
-        await query.waitForRequest(2)
+        try await query.waitForRequest(2)
         await query.succeed([
             makeSnapshot(id: 2, productID: "a"),
             makeSnapshot(id: 1, productID: "b"),
         ])
-        let secondValue = try await second.terminalValue()
+        let secondValue = try await second.receipt.terminalValue()
 
         #expect(secondValue.transactions.map(\.productID) == ["a", "b"])
         #expect(await publicationSizes.snapshot() == [1, 2])
@@ -46,14 +46,14 @@ struct EntitlementRefreshCoordinatorTests {
         let snapshot = makeSnapshot(id: 4)
 
         let first = await coordinator.reserve()
-        await query.waitForRequest(1)
+        try await query.waitForRequest(1)
         await query.succeed([snapshot])
-        _ = try await first.terminalValue()
+        _ = try await first.receipt.terminalValue()
 
         let second = await coordinator.reserve()
-        await query.waitForRequest(2)
+        try await query.waitForRequest(2)
         await query.succeed([snapshot])
-        let value = try await second.terminalValue()
+        let value = try await second.receipt.terminalValue()
 
         #expect(value.transactions == [snapshot])
         #expect(await publicationSizes.snapshot() == [1])
@@ -72,19 +72,45 @@ struct EntitlementRefreshCoordinatorTests {
         )
 
         let failed = await coordinator.reserve()
-        await query.waitForRequest(1)
+        try await query.waitForRequest(1)
         await query.fail(TestFailure())
         await #expect(throws: TestFailure.self) {
-            _ = try await failed.terminalValue()
+            _ = try await failed.receipt.terminalValue()
         }
         #expect(await publicationSizes.snapshot().isEmpty)
 
         let recovered = await coordinator.reserve()
-        await query.waitForRequest(2)
+        try await query.waitForRequest(2)
         await query.succeed([])
-        let value = try await recovered.terminalValue()
+        let value = try await recovered.receipt.terminalValue()
         #expect(value.transactions.isEmpty)
         #expect(await publicationSizes.snapshot() == [0])
+        await coordinator.sealAndDrain()
+    }
+
+    @Test("each pending query batch has one reporting owner")
+    func pendingBatchReportingAuthority() async throws {
+        let query = ControlledEntitlementQuery()
+        let coordinator = EntitlementRefreshCoordinator(
+            query: { try await query.next() },
+            didChange: { _ in }
+        )
+
+        let active = await coordinator.reserve()
+        try await query.waitForRequest(1)
+        let nextOwner = await coordinator.reserve()
+        let nextObserver = await coordinator.reserve()
+
+        #expect(active.role == .owner)
+        #expect(nextOwner.role == .owner)
+        #expect(nextObserver.role == .observer)
+
+        await query.succeed([])
+        _ = try await active.receipt.terminalValue()
+        try await query.waitForRequest(2)
+        await query.succeed([])
+        _ = try await nextOwner.receipt.terminalValue()
+        _ = try await nextObserver.receipt.terminalValue()
         await coordinator.sealAndDrain()
     }
 }

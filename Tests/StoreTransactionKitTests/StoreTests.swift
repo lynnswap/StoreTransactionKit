@@ -1,7 +1,7 @@
 import Testing
 @testable import StoreTransactionKit
 
-@Suite("Observable Store")
+@Suite("Observable TransactionStore", .timeLimit(.minutes(1)))
 @MainActor
 struct StoreTests {
     private enum SubscriptionID: String, Hashable, Sendable {
@@ -19,7 +19,7 @@ struct StoreTests {
             currentEntitlements: { await values.read() }
         )
         fixture.unfinished.finish()
-        let store = Store<SubscriptionID>(
+        let store = TransactionStore<SubscriptionID>(
             source: fixture.source,
             handleTransaction: { _ in },
             reportFailure: { _ in }
@@ -45,6 +45,42 @@ struct StoreTests {
         try await store.close()
     }
 
+    @Test("an upgraded transaction remains in the snapshot without granting access")
+    func upgradedTransactionProjection() async throws {
+        let fixture = TestSourceFixture(
+            currentEntitlements: {
+                [
+                    makeSnapshot(
+                        id: 1,
+                        productID: SubscriptionID.monthly.rawValue,
+                        isUpgraded: true
+                    ),
+                    makeSnapshot(
+                        id: 2,
+                        productID: SubscriptionID.yearly.rawValue
+                    ),
+                ]
+            }
+        )
+        fixture.unfinished.finish()
+        let store = TransactionStore<SubscriptionID>(
+            source: fixture.source,
+            handleTransaction: { _ in },
+            reportFailure: { _ in }
+        )
+
+        await store.waitForStartup()
+
+        #expect(store.activeEntitlements == [.yearly])
+        #expect(
+            store.entitlements?.transactions.map(\.productID) == [
+                SubscriptionID.monthly.rawValue,
+                SubscriptionID.yearly.rawValue,
+            ]
+        )
+        try await store.close()
+    }
+
     @Test("a later refresh recovers observable state after startup failure")
     func startupFailureRecovery() async throws {
         let query = ControlledEntitlementQuery()
@@ -52,14 +88,14 @@ struct StoreTests {
             currentEntitlements: { try await query.next() }
         )
         fixture.unfinished.finish()
-        let store = Store<SubscriptionID>(
+        let store = TransactionStore<SubscriptionID>(
             source: fixture.source,
             handleTransaction: { _ in },
             reportFailure: { _ in }
         )
 
         #expect(store.activeEntitlements == nil)
-        await query.waitForRequest(1)
+        try await query.waitForRequest(1)
         await query.fail(TestFailure())
         await store.waitForStartup()
         #expect(store.entitlements == nil)
@@ -67,7 +103,7 @@ struct StoreTests {
         #expect(store.startupError != nil)
 
         let refresh = Task { try await store.refreshEntitlements() }
-        await query.waitForRequest(2)
+        try await query.waitForRequest(2)
         await query.succeed([
             makeSnapshot(id: 4, productID: SubscriptionID.yearly.rawValue)
         ])
@@ -78,11 +114,64 @@ struct StoreTests {
         try await store.close()
     }
 
+    @Test("a stale startup failure cannot replace newer entitlement readiness")
+    func newerReadinessWinsStartupFailureRace() async throws {
+        let snapshot = makeSnapshot(
+            id: 7,
+            productID: SubscriptionID.monthly.rawValue
+        )
+        let query = ControlledEntitlementQuery()
+        let fixture = TestSourceFixture(
+            currentEntitlements: { try await query.next() }
+        )
+        let store = TransactionStore<SubscriptionID>(
+            source: fixture.source,
+            handleTransaction: { _ in },
+            reportFailure: { failure in
+                Issue.record("Unexpected background failure: \(failure)")
+            }
+        )
+
+        fixture.updates.yield(
+            .verified(makeEnvelope(snapshot: snapshot))
+        )
+        try await query.waitForRequest(1)
+        await query.succeed([snapshot])
+
+        fixture.unfinished.finish()
+        try await query.waitForRequest(2)
+        await query.fail(TestFailure())
+        await store.waitForStartup()
+
+        #expect(store.activeEntitlements == [.monthly])
+        #expect(store.startupError == nil)
+        try await store.close()
+    }
+
+    @Test("a dependency cancellation failure remains a startup error")
+    func startupCancellationFailure() async throws {
+        let fixture = TestSourceFixture(
+            currentEntitlements: { throw CancellationError() }
+        )
+        fixture.unfinished.finish()
+        let store = TransactionStore<SubscriptionID>(
+            source: fixture.source,
+            handleTransaction: { _ in },
+            reportFailure: { _ in }
+        )
+
+        await store.waitForStartup()
+
+        #expect(store.startupError is CancellationError)
+        #expect(store.activeEntitlements == nil)
+        try await store.close()
+    }
+
     @Test("an empty set means entitlement resolution completed")
     func emptyTypedEntitlementProjection() async throws {
         let fixture = TestSourceFixture(currentEntitlements: { [] })
         fixture.unfinished.finish()
-        let store = Store<SubscriptionID>(
+        let store = TransactionStore<SubscriptionID>(
             source: fixture.source,
             handleTransaction: { _ in },
             reportFailure: { _ in }
@@ -94,10 +183,10 @@ struct StoreTests {
         try await store.close()
     }
 
-    @Test("the Store facade rejects handler reentry during startup")
+    @Test("the TransactionStore facade rejects handler reentry during startup")
     func startupHandlerReentrancy() async throws {
         let fixture = TestSourceFixture()
-        let holder = StoreHolder<SubscriptionID>()
+        let holder = TransactionStoreHolder<SubscriptionID>()
         let rejected = TestSignal()
         let finished = TestSignal()
         fixture.unfinished.yield(
@@ -107,18 +196,18 @@ struct StoreTests {
                 }))
         fixture.unfinished.finish()
 
-        let store = Store<SubscriptionID>(
+        let store = TransactionStore<SubscriptionID>(
             source: fixture.source,
             handleTransaction: { _ in
                 do {
                     _ = try await holder.get().refreshEntitlements()
-                    Issue.record("Store unexpectedly allowed handler reentry.")
+                    Issue.record("TransactionStore unexpectedly allowed handler reentry.")
                 } catch StoreTransactionError.reentrantOperation(
                     operation: .currentEntitlements
                 ) {
                     await rejected.send()
                 } catch {
-                    Issue.record("Unexpected Store reentrancy error: \(error)")
+                    Issue.record("Unexpected TransactionStore reentrancy error: \(error)")
                 }
             },
             reportFailure: { _ in }
@@ -139,12 +228,12 @@ struct StoreTests {
             currentEntitlements: { try await query.next() }
         )
         fixture.unfinished.finish()
-        let store = Store<SubscriptionID>(
+        let store = TransactionStore<SubscriptionID>(
             source: fixture.source,
             handleTransaction: { _ in },
             reportFailure: { _ in }
         )
-        await query.waitForRequest(1)
+        try await query.waitForRequest(1)
 
         let refresh = Task { try await store.refreshEntitlements() }
         refresh.cancel()
@@ -164,7 +253,7 @@ struct StoreTests {
         let fixture = TestSourceFixture(
             currentEntitlements: { try await query.next() }
         )
-        let holder = StoreHolder<SubscriptionID>()
+        let holder = TransactionStoreHolder<SubscriptionID>()
         let closeRejected = TestSignal()
         let startupCompleted = TestSignal()
         fixture.unfinished.yield(
@@ -172,18 +261,18 @@ struct StoreTests {
         )
         fixture.unfinished.finish()
 
-        let store = Store<SubscriptionID>(
+        let store = TransactionStore<SubscriptionID>(
             source: fixture.source,
             handleTransaction: { _ in
                 do {
                     try await holder.get().close()
-                    Issue.record("Store unexpectedly allowed a reentrant close.")
+                    Issue.record("TransactionStore unexpectedly allowed a reentrant close.")
                 } catch StoreTransactionError.reentrantOperation(
                     operation: .close
                 ) {
                     await closeRejected.send()
                 } catch {
-                    Issue.record("Unexpected Store reentrancy error: \(error)")
+                    Issue.record("Unexpected TransactionStore reentrancy error: \(error)")
                 }
             },
             reportFailure: { _ in }
@@ -194,12 +283,12 @@ struct StoreTests {
             await startupCompleted.send()
         }
 
-        await closeRejected.wait(for: 1)
-        await query.waitForRequest(1)
+        try await closeRejected.wait(for: 1)
+        try await query.waitForRequest(1)
         #expect(await startupCompleted.value() == 0)
 
         await query.succeed([])
-        await query.waitForRequest(2)
+        try await query.waitForRequest(2)
         await query.succeed([])
         await startupWaiter.value
         #expect(await startupCompleted.value() == 1)

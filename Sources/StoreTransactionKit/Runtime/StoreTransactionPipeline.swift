@@ -17,7 +17,7 @@ package final class StoreTransactionPipeline: Sendable {
         _ delivery: StoreTransactionDelivery
     ) async throws -> (
         snapshot: StoreTransactionSnapshot,
-        receipt: ProcessingReceipt<StoreTransactionSnapshot>
+        acceptance: ProcessingAcceptance<StoreTransactionSnapshot>
     ) {
         switch delivery {
         case .verified(let envelope):
@@ -32,11 +32,11 @@ package final class StoreTransactionPipeline: Sendable {
         source: StoreTransactionBackgroundFailure.Source
     ) async {
         let snapshot: StoreTransactionSnapshot?
-        let receipt: ProcessingReceipt<StoreTransactionSnapshot>
+        let acceptance: ProcessingAcceptance<StoreTransactionSnapshot>
         do {
             let accepted = try await accept(delivery)
             snapshot = accepted.snapshot
-            receipt = accepted.receipt
+            acceptance = accepted.acceptance
         } catch {
             await failures.enqueue(
                 StoreTransactionBackgroundFailure(
@@ -48,9 +48,22 @@ package final class StoreTransactionPipeline: Sendable {
             return
         }
 
+        await processAcceptedBackground(
+            snapshot: snapshot,
+            acceptance: acceptance,
+            source: source
+        )
+    }
+
+    package func processAcceptedBackground(
+        snapshot: StoreTransactionSnapshot?,
+        acceptance: ProcessingAcceptance<StoreTransactionSnapshot>,
+        source: StoreTransactionBackgroundFailure.Source
+    ) async {
         do {
-            _ = try await receipt.terminalValue()
+            _ = try await acceptance.receipt.terminalValue()
         } catch {
+            guard case .owner = acceptance.role else { return }
             await failures.enqueue(
                 StoreTransactionBackgroundFailure(
                     source: source,
@@ -61,10 +74,14 @@ package final class StoreTransactionPipeline: Sendable {
             return
         }
 
+        if case .inFlightObserver = acceptance.role {
+            return
+        }
+        let refresh = await entitlements.reserve()
         do {
-            let refresh = await entitlements.reserve()
-            _ = try await refresh.terminalValue()
+            _ = try await refresh.receipt.terminalValue()
         } catch {
+            guard refresh.role == .owner else { return }
             await failures.enqueue(
                 StoreTransactionBackgroundFailure(
                     source: .entitlementRefresh,
@@ -75,23 +92,20 @@ package final class StoreTransactionPipeline: Sendable {
         }
     }
 
-    package func reportAbandoned(
-        operation: StoreTransactionOperation,
-        snapshot: StoreTransactionSnapshot?,
-        receipt: ProcessingReceipt<StoreTransactionSnapshot>
-    ) async {
+    package func refreshEntitlements() async {
+        let refresh = await entitlements.reserve()
         do {
-            _ = try await receipt.terminalValue()
-            let refresh = await entitlements.reserve()
-            _ = try await refresh.terminalValue()
+            _ = try await refresh.receipt.terminalValue()
         } catch {
+            guard refresh.role == .owner else { return }
             await failures.enqueue(
                 StoreTransactionBackgroundFailure(
-                    source: .abandonedDirectOperation(operation),
-                    transactionID: snapshot?.id,
-                    productID: snapshot?.productID,
+                    source: .entitlementRefresh,
+                    transactionID: nil,
+                    productID: nil,
                     underlyingError: error
                 ))
         }
     }
+
 }

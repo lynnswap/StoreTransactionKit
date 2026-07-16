@@ -1,5 +1,10 @@
 import StoreKit
 
+private struct DirectOperationFailure: Error {
+    let underlyingError: any Error
+    let reportsWhenAbandoned: Bool
+}
+
 package final class StoreTransactionRuntime: Sendable {
     private let source: StoreTransactionSource
     private let core: TransactionProcessingCore<StoreTransactionSnapshot>
@@ -9,10 +14,12 @@ package final class StoreTransactionRuntime: Sendable {
     private let restoreCoordinator: RestoreCoordinator
     private let operations = FiniteOperationRegistry()
     private let readinessLease: FiniteOperationLease
+    private let subscriptionStatusReadiness: ProcessingReceipt<Void>
     private let producerCancellation = TaskCancellationBag()
     private let finiteTasks = TaskCompletionBag()
     private let updatesTask: Task<Void, Never>
     private let unfinishedTask: Task<Void, Never>
+    private let subscriptionStatusTask: Task<Void, Never>
 
     package init(
         sessionID: UUID,
@@ -30,14 +37,20 @@ package final class StoreTransactionRuntime: Sendable {
             sessionID: sessionID,
             handle: handleTransaction
         )
-        let entitlements = EntitlementRefreshCoordinator(
-            sessionID: sessionID,
-            query: source.currentEntitlements,
-            didChange: entitlementsDidChange
-        )
         let failures = FailureReporterDispatcher(
             sessionID: sessionID,
             report: reportFailure
+        )
+        let currentEntitlements = CurrentEntitlementReconciler(
+            query: source.currentEntitlements,
+            queryUnfinished: source.queryUnfinished,
+            core: core,
+            failures: failures
+        )
+        let entitlements = EntitlementRefreshCoordinator(
+            sessionID: sessionID,
+            query: currentEntitlements.query,
+            didChange: entitlementsDidChange
         )
         let pipeline = StoreTransactionPipeline(
             core: core,
@@ -53,19 +66,36 @@ package final class StoreTransactionRuntime: Sendable {
             entitlements: entitlements
         )
         self.readinessLease = operations.begin()!
+        let subscriptionStatusReadiness = ProcessingReceipt<Void>()
+        self.subscriptionStatusReadiness = subscriptionStatusReadiness
 
-        self.updatesTask = Task {
+        self.updatesTask = Task.detached {
             await source.runUpdates { delivery in
                 await pipeline.processBackground(delivery, source: .updates)
             }
         }
-        self.unfinishedTask = Task {
+        self.unfinishedTask = Task.detached {
             await source.runUnfinished { delivery in
                 await pipeline.processBackground(delivery, source: .unfinished)
             }
         }
+        self.subscriptionStatusTask = Task.detached {
+            await source.runSubscriptionStatusUpdates {
+                do {
+                    _ = try await subscriptionStatusReadiness.value()
+                } catch is ProcessingReceiptWaiterCancellation {
+                    return
+                } catch {
+                    preconditionFailure(
+                        "Subscription status readiness cannot fail: \(error)"
+                    )
+                }
+                await pipeline.refreshEntitlements()
+            }
+        }
         producerCancellation.insert(updatesTask)
         producerCancellation.insert(unfinishedTask)
+        producerCancellation.insert(subscriptionStatusTask)
     }
 
     package func beginOperation() -> FiniteOperationLeases? {
@@ -73,12 +103,19 @@ package final class StoreTransactionRuntime: Sendable {
     }
 
     package func readiness() async throws -> StoreTransactionReadiness {
-        defer { readinessLease.end() }
+        defer {
+            subscriptionStatusReadiness.succeed(())
+            readinessLease.end()
+        }
         await unfinishedTask.value
-        let receipt = await entitlements.reserve()
-        return StoreTransactionReadiness(
-            entitlements: try await receipt.value()
-        )
+        let reservation = await entitlements.reserve()
+        do {
+            return StoreTransactionReadiness(
+                entitlements: try await reservation.receipt.value()
+            )
+        } catch is ProcessingReceiptWaiterCancellation {
+            throw CancellationError()
+        }
     }
 
     package func process(
@@ -87,40 +124,10 @@ package final class StoreTransactionRuntime: Sendable {
     ) async throws -> StorePurchaseOutcome {
         switch result {
         case .success(let verificationResult):
-            let accepted:
-                (
-                    snapshot: StoreTransactionSnapshot,
-                    receipt: ProcessingReceipt<StoreTransactionSnapshot>
-                )
-            do {
-                accepted = try await pipeline.accept(
-                    source.purchaseDelivery(verificationResult)
-                )
-            } catch {
-                leases.work.end()
-                leases.observer.end()
-                throw error
-            }
-            let operationReceipt = ProcessingReceipt<StoreTransactionSnapshot>()
-            let entitlements = entitlements
-            let task = Task {
-                defer { leases.work.end() }
-                do {
-                    let snapshot = try await accepted.receipt.terminalValue()
-                    let refresh = await entitlements.reserve()
-                    _ = try await refresh.terminalValue()
-                    operationReceipt.succeed(snapshot)
-                } catch {
-                    operationReceipt.fail(error)
-                }
-            }
-            finiteTasks.insert(task)
-            return try await outcome(
-                receipt: operationReceipt,
-                operation: .processPurchase,
-                snapshot: accepted.snapshot,
-                observerLease: leases.observer
-            ) { .completed($0) }
+            return try await process(
+                source.purchaseDelivery(verificationResult),
+                leases: leases
+            )
         case .pending:
             do {
                 try Task.checkCancellation()
@@ -150,6 +157,63 @@ package final class StoreTransactionRuntime: Sendable {
         }
     }
 
+    package func process(
+        _ delivery: StoreTransactionDelivery,
+        leases: FiniteOperationLeases
+    ) async throws -> StorePurchaseOutcome {
+        let accepted:
+            (
+                snapshot: StoreTransactionSnapshot,
+                acceptance: ProcessingAcceptance<StoreTransactionSnapshot>
+            )
+        do {
+            accepted = try await pipeline.accept(delivery)
+        } catch {
+            leases.work.end()
+            leases.observer.end()
+            throw error
+        }
+        let operationReceipt = ProcessingReceipt<StoreTransactionSnapshot>()
+        let entitlements = entitlements
+        let task = Task {
+            defer { leases.work.end() }
+            let snapshot: StoreTransactionSnapshot
+            do {
+                snapshot = try await accepted.acceptance.receipt
+                    .terminalValue()
+            } catch {
+                operationReceipt.fail(
+                    DirectOperationFailure(
+                        underlyingError: error,
+                        reportsWhenAbandoned:
+                            accepted.acceptance.role == .owner
+                    )
+                )
+                return
+            }
+
+            let refresh = await entitlements.reserve()
+            do {
+                _ = try await refresh.receipt.terminalValue()
+                operationReceipt.succeed(snapshot)
+            } catch {
+                operationReceipt.fail(
+                    DirectOperationFailure(
+                        underlyingError: error,
+                        reportsWhenAbandoned: refresh.role == .owner
+                    )
+                )
+            }
+        }
+        finiteTasks.insert(task)
+        return try await outcome(
+            receipt: operationReceipt,
+            operation: .processPurchase,
+            snapshot: accepted.snapshot,
+            observerLease: leases.observer
+        ) { .completed($0) }
+    }
+
     package func currentEntitlements(
         leases: FiniteOperationLeases
     ) async throws -> StoreEntitlements {
@@ -157,11 +221,18 @@ package final class StoreTransactionRuntime: Sendable {
         let entitlements = entitlements
         let task = Task {
             defer { leases.work.end() }
+            let refresh = await entitlements.reserve()
             do {
-                let refresh = await entitlements.reserve()
-                operationReceipt.succeed(try await refresh.terminalValue())
+                operationReceipt.succeed(
+                    try await refresh.receipt.terminalValue()
+                )
             } catch {
-                operationReceipt.fail(error)
+                operationReceipt.fail(
+                    DirectOperationFailure(
+                        underlyingError: error,
+                        reportsWhenAbandoned: refresh.role == .owner
+                    )
+                )
             }
         }
         finiteTasks.insert(task)
@@ -201,16 +272,27 @@ package final class StoreTransactionRuntime: Sendable {
     package func restorePurchases(
         leases: FiniteOperationLeases
     ) async throws -> StoreEntitlements {
+        let restore = await restoreCoordinator.reserve()
         let operationReceipt = ProcessingReceipt<StoreEntitlements>()
-        let restoreCoordinator = restoreCoordinator
         let task = Task {
             defer { leases.work.end() }
             do {
                 operationReceipt.succeed(
-                    try await restoreCoordinator.restore()
+                    try await restore.receipt.terminalValue()
+                )
+            } catch let failure as RestoreCoordinatorFailure {
+                operationReceipt.fail(
+                    DirectOperationFailure(
+                        underlyingError: failure.underlyingError,
+                        reportsWhenAbandoned:
+                            restore.role == .owner
+                            && failure.reportsWhenAbandoned
+                    )
                 )
             } catch {
-                operationReceipt.fail(error)
+                preconditionFailure(
+                    "RestoreCoordinator exposed an unclassified failure: \(error)"
+                )
             }
         }
         finiteTasks.insert(task)
@@ -226,10 +308,11 @@ package final class StoreTransactionRuntime: Sendable {
         producerCancellation.cancel()
         await updatesTask.value
         await unfinishedTask.value
+        await subscriptionStatusTask.value
         await operations.stopAdmissionAndWait()
         await finiteTasks.waitForAll()
-        await core.finishInputAndDrain()
         await entitlements.sealAndDrain()
+        await core.finishInputAndDrain()
         await failures.sealAndDrain()
         producerCancellation.removeAll()
     }
@@ -250,12 +333,22 @@ package final class StoreTransactionRuntime: Sendable {
             let value = try await receipt.value()
             observerLease.end()
             return transform(value)
-        } catch is CancellationError {
+        } catch is ProcessingReceiptWaiterCancellation {
             let failures = failures
             let task = Task {
                 defer { observerLease.end() }
                 do {
                     _ = try await receipt.terminalValue()
+                } catch let failure as DirectOperationFailure {
+                    guard failure.reportsWhenAbandoned else { return }
+                    await failures.enqueue(
+                        StoreTransactionBackgroundFailure(
+                            source: .abandonedDirectOperation(operation),
+                            transactionID: snapshot?.id,
+                            productID: snapshot?.productID,
+                            underlyingError: failure.underlyingError
+                        )
+                    )
                 } catch {
                     await failures.enqueue(
                         StoreTransactionBackgroundFailure(
@@ -268,6 +361,9 @@ package final class StoreTransactionRuntime: Sendable {
             }
             finiteTasks.insert(task)
             throw CancellationError()
+        } catch let failure as DirectOperationFailure {
+            observerLease.end()
+            throw failure.underlyingError
         } catch {
             observerLease.end()
             throw error

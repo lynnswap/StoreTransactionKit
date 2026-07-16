@@ -1,5 +1,5 @@
 /// The semantic result of processing a direct StoreKit purchase result.
-public enum StorePurchaseOutcome: Sendable {
+public enum StorePurchaseOutcome: Sendable, Hashable {
     /// StoreTransactionKit verified, durably handled, finished, and refreshed the transaction.
     case completed(StoreTransactionSnapshot)
 

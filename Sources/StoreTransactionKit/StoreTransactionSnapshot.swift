@@ -4,7 +4,7 @@ import StoreKit
 /// An immutable projection of a transaction that StoreKit verified.
 ///
 /// StoreTransactionKit creates snapshots only after StoreKit verification
-/// succeeds. A snapshot never owns the underlying ``StoreKit/Transaction`` and
+/// succeeds. A snapshot never owns the underlying `Transaction` and
 /// exposes no authority to finish it.
 public struct StoreTransactionSnapshot: Sendable, Hashable {
     /// The identifier of this transaction revision's transaction.
@@ -21,6 +21,26 @@ public struct StoreTransactionSnapshot: Sendable, Hashable {
 
     /// The StoreKit product type associated with the transaction.
     public let productType: Product.ProductType
+
+    /// The App Store server environment that generated and signed the transaction.
+    public let environment: AppStore.Environment
+
+    /// The offer that applies to the transaction, when applicable.
+    public let offer: Transaction.Offer?
+
+    /// The Apple-defined identifier of the storefront associated with the transaction.
+    public let storefrontID: String
+
+    /// The ISO 3166-1 alpha-3 country code of the transaction's storefront.
+    public let storefrontCountryCode: String
+
+    /// The total price StoreKit recorded for the transaction, in units of ``currency``.
+    ///
+    /// Use App Store Connect reporting tools for financial and accounting purposes.
+    public let price: Decimal?
+
+    /// The currency of ``price``.
+    public let currency: Locale.Currency?
 
     /// The date on which the customer purchased this transaction.
     public let purchaseDate: Date
@@ -68,6 +88,12 @@ public struct StoreTransactionSnapshot: Sendable, Hashable {
         productID: String,
         subscriptionGroupID: String?,
         productType: Product.ProductType,
+        environment: AppStore.Environment,
+        offer: Transaction.Offer?,
+        storefrontID: String,
+        storefrontCountryCode: String,
+        price: Decimal?,
+        currency: Locale.Currency?,
         purchaseDate: Date,
         originalPurchaseDate: Date,
         expirationDate: Date?,
@@ -86,6 +112,12 @@ public struct StoreTransactionSnapshot: Sendable, Hashable {
         self.productID = productID
         self.subscriptionGroupID = subscriptionGroupID
         self.productType = productType
+        self.environment = environment
+        self.offer = offer
+        self.storefrontID = storefrontID
+        self.storefrontCountryCode = storefrontCountryCode
+        self.price = price
+        self.currency = currency
         self.purchaseDate = purchaseDate
         self.originalPurchaseDate = originalPurchaseDate
         self.expirationDate = expirationDate
