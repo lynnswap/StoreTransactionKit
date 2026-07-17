@@ -38,48 +38,43 @@ Your app owns everything the user sees and everything it persists:
 
 ## Quick start
 
-Define the Product IDs and app entitlements that gate your features. Keep the
-subscription group alongside each subscription so the catalog can validate
-StoreKit's group membership:
+Define the app entitlements, then describe one App Store Connect subscription
+group with its Product IDs:
 
 ```swift
 import StoreTransactionKit
-
-enum SubscriptionGroupID: String, Hashable, Sendable {
-    case plans = "YOUR_SUBSCRIPTION_GROUP_ID"
-}
-
-enum SubscriptionProductID: String, CaseIterable, Hashable, Sendable {
-    case tier1Monthly = "com.example.subscription.tier1.monthly"
-    case tier1Yearly = "com.example.subscription.tier1.yearly"
-    case tier2Monthly = "com.example.subscription.tier2.monthly"
-    case tier2Yearly = "com.example.subscription.tier2.yearly"
-
-    var entitlement: SubscriptionEntitlement {
-        switch self {
-        case .tier1Monthly, .tier1Yearly:
-            .tier1
-
-        case .tier2Monthly, .tier2Yearly:
-            .tier2
-        }
-    }
-
-    var subscriptionGroupID: SubscriptionGroupID {
-        .plans
-    }
-}
 
 enum SubscriptionEntitlement: Hashable, Sendable {
     case tier1
     case tier2
 }
 
-let entitlementCatalog = EntitlementCatalog(
-    products: SubscriptionProductID.self,
-    entitlement: \.entitlement,
-    subscriptionGroupID: \.subscriptionGroupID
-)
+enum Plans: SubscriptionGroup {
+    static let id = SubscriptionGroupID(
+        rawValue: "YOUR_SUBSCRIPTION_GROUP_ID"
+    )
+
+    enum ProductID: String, CaseIterable {
+        case tier1_Monthly = "com.example.subscription.tier1.monthly"
+        case tier1_Yearly = "com.example.subscription.tier1.yearly"
+        case tier2_Monthly = "com.example.subscription.tier2.monthly"
+        case tier2_Yearly = "com.example.subscription.tier2.yearly"
+    }
+
+    static func entitlement(
+        for productID: ProductID
+    ) -> SubscriptionEntitlement {
+        switch productID {
+        case .tier1_Monthly, .tier1_Yearly:
+            .tier1
+
+        case .tier2_Monthly, .tier2_Yearly:
+            .tier2
+        }
+    }
+}
+
+let subscriptionCatalog = SubscriptionCatalog(Plans.self)
 
 actor PurchaseLedger {
     func apply(_ transaction: StoreTransactionSnapshot) async throws {
@@ -112,7 +107,7 @@ func makeStore(
     diagnostics: StoreDiagnostics
 ) -> TransactionStore<SubscriptionEntitlement> {
     TransactionStore(
-        entitlementCatalog: entitlementCatalog,
+        subscriptionCatalog: subscriptionCatalog,
         handleTransaction: { transaction in
             try await ledger.apply(transaction)
         },
@@ -197,7 +192,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $isShowingPaywall) {
             SubscriptionStoreView(
-                groupID: SubscriptionGroupID.plans.rawValue
+                groupID: Plans.id.rawValue
             )
         }
     }
@@ -206,10 +201,10 @@ struct ContentView: View {
 
 ### Connect the identifiers
 
-Replace the group and product raw values with the identifiers configured in
-[App Store Connect][subscription-setup]. Each Product ID maps to one app
-entitlement. StoreKit remains the source of truth for subscription group levels
-and durations.
+Replace `Plans.id` and the nested Product ID raw values with the identifiers
+configured in [App Store Connect][subscription-setup]. Map monthly and yearly
+products that grant the same access level to the same app entitlement. StoreKit
+remains the source of truth for levels and durations.
 
 For local StoreKit Testing, use the same values in the active `.storekit`
 configuration. See [Setting up StoreKit Testing in Xcode][storekit-testing].
@@ -264,9 +259,9 @@ Both callback contracts are documented on `TransactionStore.init`.
 - Unverified current-entitlement elements are omitted and reported to
   `reportFailure` with source `.currentEntitlementVerification`.
 - Product IDs mapped to the same app entitlement appear as the same typed value.
-  Gate access on that set, or use
-  `StoreTransactionSnapshot.subscriptionGroupID` to grant at
-  subscription-group granularity.
+- `SubscriptionCatalog` maps auto-renewable subscriptions only. Other product
+  types don't belong to subscription groups; consumables remain part of
+  transaction handling and never appear in current entitlements.
 
 For the full delivery, reconciliation, and failure-reporting model, see
 [Understanding transaction handling][understanding].
