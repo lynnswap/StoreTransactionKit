@@ -15,6 +15,9 @@ import StoreKit
 /// ``activeEntitlements``. The complete verified projection remains available
 /// through ``entitlements`` so identifiers outside that app-defined type are
 /// never hidden.
+///
+/// <doc:UnderstandingTransactionHandling> describes the delivery,
+/// reconciliation, and failure-reporting model behind this type.
 @MainActor
 @Observable
 public final class TransactionStore<EntitlementID>

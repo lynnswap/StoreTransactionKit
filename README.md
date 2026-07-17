@@ -5,7 +5,27 @@ durable processing, and `Transaction.finish()` into one process-owned,
 observable store.
 It supports iOS 18.4 and later and macOS 15.4 and later.
 
-## Create a TransactionStore
+## What it owns — and what your app owns
+
+The store owns the durable transaction path for the process lifetime:
+
+- Monitoring: `Transaction.updates`, `Transaction.unfinished` reconciliation,
+  and subscription status changes
+- Verification: only verified transactions reach your code; unverified
+  elements are skipped and reported
+- Ordering: durable handling first, then `finish()`, with at-least-once
+  delivery to an idempotent handler and exact-revision deduplication
+- State: the observable current-entitlement projection, restore
+  synchronization, background failure delivery, and explicit shutdown
+
+Your app owns everything the user sees and everything it persists:
+
+- Paywall and purchase UI (StoreKit views or `Product.purchase`)
+- The durable ledger that the transaction handler writes to
+- Subscription status presentation (`Product.SubscriptionInfo.Status`)
+- Purchases that begin outside the app (`PurchaseIntent.intents`)
+
+## Quick start
 
 Define the entitlement identifiers in the app. A string-backed enum keeps
 StoreKit product identifiers typed without requiring a framework protocol.
@@ -59,45 +79,10 @@ func makeStore(
 }
 ```
 
-`TransactionStore` is `@MainActor` and `@Observable`. It monitors
-`Transaction.unfinished`, `Transaction.updates`, and subscription status
-changes during initialization. Retain one instance in the application's
-process-lifetime composition.
-
-Startup and each entitlement refresh reconcile `Transaction.unfinished`
-before publishing entitlement state. Every verified delivery is durably
-handled, including consumables. If the handler fails, startup or the refresh
-fails, the transaction remains unfinished, and a later refresh retries it.
-An unverified unfinished delivery is sent to `reportFailure` with source
-`.unfinished`.
-
-`activeEntitlements` contains the app-defined identifiers represented by
-StoreKit's current entitlements. It is `nil` while the initial entitlement
-query is unresolved and becomes a non-`nil` empty set when no known
-identifier matches a current entitlement. A subscription superseded by an
-upgrade is excluded from this set. `entitlements` contains the complete
-verified snapshot, including superseded transactions and product identifiers
-outside `SubscriptionID`. Use `StoreTransactionSnapshot.subscriptionGroupID`
-when the app grants access at subscription-group rather than product-tier
-granularity. A current-entitlement element that StoreKit can't verify is
-omitted from the projection and delivered to `reportFailure` with source
-`.currentEntitlementVerification`.
-
-For renewal dates, grace periods, billing retry, and expiration messaging,
-read `Product.SubscriptionInfo.Status` directly. `TransactionStore` owns the
-durable transaction path and current-entitlement projection, not subscription
-status presentation.
-
-## Use SubscriptionStoreView
-
-Place the same store in the SwiftUI environment. StoreKit presents and
-completes the purchase; the store's transaction listener updates observable
-state when the entitlement changes.
-
-```swift
-PremiumStoreView()
-    .environment(store)
-```
+`TransactionStore` is `@MainActor` and `@Observable`. It starts monitoring
+during initialization; retain one instance in the application's
+process-lifetime composition. Place it in the SwiftUI environment and render
+the three entitlement states — resolving, failed, and resolved:
 
 ```swift
 import StoreKit
@@ -139,29 +124,62 @@ struct PremiumStoreView: View {
 }
 ```
 
-No `onInAppPurchaseCompletion` modifier is needed here. By default, successful
-StoreKit view purchases are delivered through `Transaction.updates`, which the
-store already monitors. A non-`nil` completion action replaces that default;
-if you add one, pass each `.success` value (the `Product.PurchaseResult`) to
-`store.process(_:)`. The action also replaces StoreKit's default failure alert,
-so it must own `.failure` presentation or diagnostics.
+No `onInAppPurchaseCompletion` modifier is needed: successful StoreKit view
+purchases arrive through `Transaction.updates`, which the store already
+monitors. If you add a non-`nil` completion action, it replaces that default
+*and* StoreKit's failure alert — pass each `.success` value to
+`store.process(_:)` and own `.failure` presentation yourself.
 
-StoreTransactionKit exposes an at-least-once handler-delivery contract, so
-`PurchaseLedger.apply(_:)` must be idempotent. It must return only after the
-business effect is durable. The store calls `finish()` after that return. Treat
-purchase and revocation revisions as distinct durable business events;
-transaction ID alone is not a sufficient idempotency key for both. The handler
-must not call methods on the same store, including through an awaited detached
-task, because that creates a dependency cycle with the transaction being
-handled.
+## The handler contract
 
-Apps that support promoted purchases or applicable win-back flows own
-`PurchaseIntent.intents`: complete each intent's product purchase and pass its
-result to `store.process(_:)`.
+`handleTransaction` is the one place where correctness depends on your code:
 
-Call `store.restorePurchases()` only from an explicit user action because
-`AppStore.sync()` presents authentication UI. Treat `StoreKitError.userCancelled`
-as a normal user outcome rather than a diagnostic failure.
+- **Be idempotent.** Delivery is at least once; key the ledger on transaction
+  identity plus the business event it applies.
+- **Treat purchase and revocation as distinct events.** A refund or
+  family-sharing revocation arrives as the same transaction with
+  `revocationDate` set; transaction ID alone is not a sufficient key.
+- **Return only after the business effect is durable.** The store calls
+  `finish()` after the handler returns. Throwing keeps the transaction
+  unfinished, and a later refresh retries it.
+- **Never call back into the same store** from `handleTransaction` or
+  `reportFailure`, even through an awaited detached task — doing so creates a
+  dependency cycle with the work being handled.
+
+The complete contract is documented on `TransactionStore.init`.
+
+## How entitlement state behaves
+
+- `activeEntitlements` is `nil` until the first entitlement query resolves; an
+  empty set means the query resolved and no known identifier matched.
+- Startup and every refresh reconcile `Transaction.unfinished` — including
+  consumables — before publishing state. A handler failure fails that refresh;
+  the next refresh retries the unfinished work.
+- Transactions superseded by a subscription upgrade stay in `entitlements` but
+  leave `activeEntitlements`.
+- Unverified current-entitlement elements are omitted and reported to
+  `reportFailure` with source `.currentEntitlementVerification`.
+- Identifiers map 1:1 to product IDs. Gate access on the tier set, or use
+  `StoreTransactionSnapshot.subscriptionGroupID` to grant at
+  subscription-group granularity.
+
+For the full delivery, reconciliation, and failure-reporting model, see
+[Understanding transaction handling][understanding].
+
+## Beyond the basics
+
+- **Custom purchase UI** — load products and purchase with StoreKit, then pass
+  the `Product.PurchaseResult` to `store.process(_:)`. `.pending` outcomes
+  arrive later through the handler.
+- **Restore** — call `store.restorePurchases()` only from an explicit user
+  action; `AppStore.sync()` presents authentication UI, and
+  `StoreKitError.userCancelled` is a normal outcome, not a diagnostic failure.
+- **Promoted purchases and win-back offers** — the app owns
+  `PurchaseIntent.intents`: complete each intent's purchase and pass the
+  result to `store.process(_:)`.
+- **Renewal, grace-period, and billing-retry UI** — read
+  `Product.SubscriptionInfo.Status` directly; the store owns the durable
+  transaction path, not subscription status presentation.
 
 For product merchandising and UI composition, use Apple's
 [Getting started with In-App Purchase using StoreKit views](https://developer.apple.com/documentation/storekit/getting-started-with-in-app-purchases-using-storekit-views)
@@ -177,3 +195,5 @@ command.
 ## License
 
 StoreTransactionKit is available under the MIT License.
+
+[understanding]: https://lynnswap.github.io/StoreTransactionKit/documentation/storetransactionkit/understandingtransactionhandling
