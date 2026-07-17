@@ -7,7 +7,6 @@ struct StoreTransactionSessionTests {
     @Test("start publishes initial entitlements and close terminates producers")
     func startAndClose() async throws {
         let fixture = TestSourceFixture()
-        fixture.unfinished.finish()
         let publicationSizes = UInt64Recorder()
         let session = StoreTransactionSession(
             source: fixture.source,
@@ -45,7 +44,6 @@ struct StoreTransactionSessionTests {
                 ]
             }
         )
-        fixture.unfinished.finish()
         let session = StoreTransactionSession(
             source: fixture.source,
             handleTransaction: { transaction in
@@ -74,13 +72,161 @@ struct StoreTransactionSessionTests {
         try await session.close()
     }
 
+    @Test("startup does not retry an update failure through unfinished reconciliation")
+    func startupSharesFailedUpdateWithUnfinishedReconciliation() async throws {
+        let snapshot = makeSnapshot(
+            id: 42,
+            productID: "consumable.startup",
+            productType: .consumable
+        )
+        let envelope = makeEnvelope(snapshot: snapshot)
+        let handlerCalls = TestSignal()
+        let finishes = TestSignal()
+        let reported = TestSignal()
+        let reports = StringRecorder()
+        let fixture = TestSourceFixture(
+            currentEntitlements: {
+                try await reported.wait(for: 1)
+                return []
+            },
+            queryUnfinished: {
+                [
+                    .verified(
+                        makeEnvelope(snapshot: snapshot) {
+                            await finishes.send()
+                        })
+                ]
+            }
+        )
+        let session = StoreTransactionSession(
+            source: fixture.source,
+            handleTransaction: { _ in
+                await handlerCalls.send()
+                if await handlerCalls.value() == 1 {
+                    throw TestFailure()
+                }
+            },
+            entitlementsDidChange: { _ in },
+            reportFailure: { failure in
+                if failure.source == .updates,
+                    failure.transactionID == snapshot.id,
+                    failure.underlyingError is TestFailure
+                {
+                    await reports.append("updates-42")
+                } else {
+                    await reports.append("unexpected")
+                }
+                await reported.send()
+            }
+        )
+
+        fixture.updates.yield(.verified(envelope))
+
+        await #expect(throws: TestFailure.self) {
+            _ = try await session.start()
+        }
+        #expect(await handlerCalls.value() == 1)
+        #expect(await finishes.value() == 0)
+        #expect(await reports.snapshot() == ["updates-42"])
+
+        _ = try await session.currentEntitlements()
+
+        #expect(await handlerCalls.value() == 2)
+        #expect(await finishes.value() == 1)
+        #expect(await reports.snapshot() == ["updates-42"])
+        try await session.close()
+    }
+
+    @Test("cancelling the startup waiter does not open a retry boundary")
+    func cancelledStartupWaiterKeepsInitialAttempt() async throws {
+        let failedSnapshot = makeSnapshot(
+            id: 43,
+            productID: "consumable.cancelled-startup",
+            productType: .consumable
+        )
+        let markerSnapshot = makeSnapshot(id: 44)
+        let query = ControlledEntitlementQuery()
+        let handled = UInt64Recorder()
+        let failedFinish = TestSignal()
+        let markerFinish = TestSignal()
+        let reported = TestSignal()
+        let reports = StringRecorder()
+        let fixture = TestSourceFixture(
+            currentEntitlements: { try await query.next() },
+            queryUnfinished: {
+                [
+                    .verified(
+                        makeEnvelope(snapshot: failedSnapshot) {
+                            await failedFinish.send()
+                        })
+                ]
+            }
+        )
+        let session = StoreTransactionSession(
+            source: fixture.source,
+            handleTransaction: { snapshot in
+                await handled.append(snapshot.id)
+                if snapshot.id == failedSnapshot.id {
+                    throw TestFailure()
+                }
+            },
+            entitlementsDidChange: { _ in },
+            reportFailure: { failure in
+                if failure.source == .updates,
+                    failure.transactionID == failedSnapshot.id,
+                    failure.underlyingError is TestFailure
+                {
+                    await reports.append("updates-43")
+                } else {
+                    await reports.append("unexpected")
+                }
+                await reported.send()
+            }
+        )
+
+        let startup = Task { try await session.start() }
+        try await query.waitForRequest(1)
+        fixture.updates.yield(
+            .verified(makeEnvelope(snapshot: failedSnapshot))
+        )
+        try await reported.wait(for: 1)
+
+        startup.cancel()
+        await #expect(throws: CancellationError.self) {
+            _ = try await startup.value
+        }
+
+        fixture.updates.yield(
+            .verified(makeEnvelope(snapshot: failedSnapshot))
+        )
+        fixture.updates.yield(
+            .verified(
+                makeEnvelope(snapshot: markerSnapshot) {
+                    await markerFinish.send()
+                })
+        )
+        try await markerFinish.wait(for: 1)
+
+        #expect(await handled.snapshot() == [43, 44])
+        #expect(await failedFinish.value() == 0)
+        #expect(await reports.snapshot() == ["updates-43"])
+
+        await query.succeed([])
+        try await query.waitForRequest(2)
+        await query.succeed([])
+        try await session.close()
+
+        #expect(await handled.snapshot() == [43, 44])
+        #expect(await failedFinish.value() == 0)
+        #expect(await reports.snapshot() == ["updates-43"])
+    }
+
     @Test("subscription status waits for initial entitlement readiness")
     func subscriptionStatusWaitsForReadiness() async throws {
         let query = ControlledEntitlementQuery()
         let fixture = TestSourceFixture(
             currentEntitlements: { try await query.next() }
         )
-        fixture.unfinished.finish()
         let session = StoreTransactionSession(
             source: fixture.source,
             handleTransaction: { _ in },
@@ -110,7 +256,6 @@ struct StoreTransactionSessionTests {
         let fixture = TestSourceFixture(
             currentEntitlements: { try await query.next() }
         )
-        fixture.unfinished.finish()
         let closeCompleted = TestSignal()
         let session = StoreTransactionSession(
             source: fixture.source,
@@ -149,7 +294,6 @@ struct StoreTransactionSessionTests {
         let fixture = TestSourceFixture(
             currentEntitlements: { await values.read() }
         )
-        fixture.unfinished.finish()
         let handlerCalls = TestSignal()
         let publications = UInt64Recorder()
         let published = TestSignal()
@@ -188,7 +332,6 @@ struct StoreTransactionSessionTests {
             currentEntitlements: { await values.read() },
             queryUnfinished: { await unfinished.read() }
         )
-        fixture.unfinished.finish()
         let handlerStarted = TestSignal()
         let handlerGate = TestGate()
         let events = StringRecorder()
@@ -252,7 +395,6 @@ struct StoreTransactionSessionTests {
             currentEntitlements: { await values.read() },
             queryUnfinished: { await unfinished.read() }
         )
-        fixture.unfinished.finish()
         let handlerCalls = TestSignal()
         let finishes = TestSignal()
         let publications = UInt64Recorder()
@@ -337,7 +479,6 @@ struct StoreTransactionSessionTests {
             currentEntitlements: { await values.read() },
             queryUnfinished: { await unfinished.read() }
         )
-        fixture.unfinished.finish()
         let handlerStarted = TestSignal()
         let handlerGate = TestGate()
         let events = StringRecorder()
@@ -407,7 +548,6 @@ struct StoreTransactionSessionTests {
         let fixture = TestSourceFixture(
             queryUnfinished: { await unfinished.read() }
         )
-        fixture.unfinished.finish()
         let handlerCalls = TestSignal()
         let reports = UInt64Recorder()
         let reported = TestSignal()
@@ -449,7 +589,6 @@ struct StoreTransactionSessionTests {
                 [verificationFailure]
             }
         )
-        fixture.unfinished.finish()
         let reported = TestSignal()
         let session = StoreTransactionSession(
             source: fixture.source,
@@ -472,7 +611,6 @@ struct StoreTransactionSessionTests {
     @Test("updates use the durable handler then finish and refresh")
     func updateProcessing() async throws {
         let fixture = TestSourceFixture()
-        fixture.unfinished.finish()
         let events = StringRecorder()
         let finished = TestSignal()
         let session = StoreTransactionSession(
@@ -504,7 +642,6 @@ struct StoreTransactionSessionTests {
     @Test("background handler failures are reported and never finished")
     func backgroundFailure() async throws {
         let fixture = TestSourceFixture()
-        fixture.unfinished.finish()
         let reported = TestSignal()
         let finished = TestSignal()
         let session = StoreTransactionSession(
@@ -550,7 +687,6 @@ struct StoreTransactionSessionTests {
     @Test("callbacks reject reentry into their own session")
     func callbackReentrancy() async throws {
         let fixture = TestSourceFixture()
-        fixture.unfinished.finish()
         let holder = SessionHolder()
         let observations = StringRecorder()
         let finished = TestSignal()
@@ -625,7 +761,6 @@ struct StoreTransactionSessionTests {
             reportFailure: { _ in }
         )
         let fixture = TestSourceFixture()
-        fixture.unfinished.finish()
         let callbackCompleted = TestSignal()
         let session = StoreTransactionSession(
             source: fixture.source,

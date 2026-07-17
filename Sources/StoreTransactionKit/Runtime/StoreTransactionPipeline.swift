@@ -17,11 +17,17 @@ package final class StoreTransactionPipeline: Sendable {
         _ delivery: StoreTransactionDelivery
     ) async throws -> (
         snapshot: StoreTransactionSnapshot,
-        acceptance: ProcessingAcceptance<StoreTransactionSnapshot>
+        acceptance: ProcessingAcceptance<StoreTransactionSnapshot>,
+        retryFailedTransactions: Bool
     ) {
         switch delivery {
         case .verified(let envelope):
-            return (envelope.value, await core.accept(envelope))
+            let retryFailedTransactions = await core.beginTransactionAttempt()
+            return (
+                envelope.value,
+                await core.accept(envelope),
+                retryFailedTransactions
+            )
         case .unverified(let error):
             throw error
         }
@@ -33,10 +39,12 @@ package final class StoreTransactionPipeline: Sendable {
     ) async {
         let snapshot: StoreTransactionSnapshot?
         let acceptance: ProcessingAcceptance<StoreTransactionSnapshot>
+        let retryFailedTransactions: Bool
         do {
             let accepted = try await accept(delivery)
             snapshot = accepted.snapshot
             acceptance = accepted.acceptance
+            retryFailedTransactions = accepted.retryFailedTransactions
         } catch {
             await failures.enqueue(
                 StoreTransactionBackgroundFailure(
@@ -51,6 +59,7 @@ package final class StoreTransactionPipeline: Sendable {
         await processAcceptedBackground(
             snapshot: snapshot,
             acceptance: acceptance,
+            retryFailedTransactions: retryFailedTransactions,
             source: source
         )
     }
@@ -58,6 +67,7 @@ package final class StoreTransactionPipeline: Sendable {
     package func processAcceptedBackground(
         snapshot: StoreTransactionSnapshot?,
         acceptance: ProcessingAcceptance<StoreTransactionSnapshot>,
+        retryFailedTransactions: Bool = true,
         source: StoreTransactionBackgroundFailure.Source
     ) async {
         do {
@@ -77,7 +87,9 @@ package final class StoreTransactionPipeline: Sendable {
         if case .inFlightObserver = acceptance.role {
             return
         }
-        let refresh = await entitlements.reserve()
+        let refresh = await entitlements.reserve(
+            retryFailedTransactions: retryFailedTransactions
+        )
         do {
             _ = try await refresh.receipt.terminalValue()
         } catch {
@@ -95,7 +107,11 @@ package final class StoreTransactionPipeline: Sendable {
     }
 
     package func refreshEntitlements() async {
-        let refresh = await entitlements.reserve()
+        let retryFailedTransactions =
+            await core.retryFailedTransactionsInNewAttempt()
+        let refresh = await entitlements.reserve(
+            retryFailedTransactions: retryFailedTransactions
+        )
         do {
             _ = try await refresh.receipt.terminalValue()
         } catch {

@@ -43,7 +43,9 @@ package actor RestoreCoordinator {
         self.entitlements = entitlements
     }
 
-    package func reserve() -> RestoreReservation {
+    package func reserve(
+        retryFailedTransactions: Bool = true
+    ) -> RestoreReservation {
         if let inFlight {
             return RestoreReservation(
                 receipt: inFlight.receipt,
@@ -73,7 +75,9 @@ package actor RestoreCoordinator {
                 return
             }
 
-            let refresh = await entitlements.reserve()
+            let refresh = await entitlements.reserve(
+                retryFailedTransactions: retryFailedTransactions
+            )
             do {
                 result = .success(try await refresh.receipt.terminalValue())
             } catch {

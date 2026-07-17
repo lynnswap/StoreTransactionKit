@@ -8,7 +8,7 @@ struct EntitlementRefreshCoordinatorTests {
         let query = ControlledEntitlementQuery()
         let publicationSizes = UInt64Recorder()
         let coordinator = EntitlementRefreshCoordinator(
-            query: { try await query.next() },
+            query: { _ in try await query.next() },
             didChange: { value in
                 await publicationSizes.append(UInt64(value.transactions.count))
             }
@@ -38,7 +38,7 @@ struct EntitlementRefreshCoordinatorTests {
         let query = ControlledEntitlementQuery()
         let publicationSizes = UInt64Recorder()
         let coordinator = EntitlementRefreshCoordinator(
-            query: { try await query.next() },
+            query: { _ in try await query.next() },
             didChange: { value in
                 await publicationSizes.append(UInt64(value.transactions.count))
             }
@@ -65,7 +65,7 @@ struct EntitlementRefreshCoordinatorTests {
         let query = ControlledEntitlementQuery()
         let publicationSizes = UInt64Recorder()
         let coordinator = EntitlementRefreshCoordinator(
-            query: { try await query.next() },
+            query: { _ in try await query.next() },
             didChange: { value in
                 await publicationSizes.append(UInt64(value.transactions.count))
             }
@@ -92,7 +92,7 @@ struct EntitlementRefreshCoordinatorTests {
     func pendingBatchReportingAuthority() async throws {
         let query = ControlledEntitlementQuery()
         let coordinator = EntitlementRefreshCoordinator(
-            query: { try await query.next() },
+            query: { _ in try await query.next() },
             didChange: { _ in }
         )
 
@@ -111,6 +111,68 @@ struct EntitlementRefreshCoordinatorTests {
         await query.succeed([])
         _ = try await nextOwner.receipt.terminalValue()
         _ = try await nextObserver.receipt.terminalValue()
+        await coordinator.sealAndDrain()
+    }
+
+    @Test("mixed retry policies form contiguous query batches")
+    func mixedRetryPolicyBatches() async throws {
+        let query = ControlledEntitlementQuery()
+        let policies = StringRecorder()
+        let coordinator = EntitlementRefreshCoordinator(
+            query: { retryFailedTransactions in
+                await policies.append(String(retryFailedTransactions))
+                return try await query.next()
+            },
+            didChange: { _ in }
+        )
+
+        let active = await coordinator.reserve(
+            retryFailedTransactions: false
+        )
+        try await query.waitForRequest(1)
+        let falseOwner = await coordinator.reserve(
+            retryFailedTransactions: false
+        )
+        let falseObserver = await coordinator.reserve(
+            retryFailedTransactions: false
+        )
+        let trueOwner = await coordinator.reserve(
+            retryFailedTransactions: true
+        )
+        let trueObserver = await coordinator.reserve(
+            retryFailedTransactions: true
+        )
+        let trailingFalseOwner = await coordinator.reserve(
+            retryFailedTransactions: false
+        )
+
+        #expect(falseOwner.role == .owner)
+        #expect(falseObserver.role == .observer)
+        #expect(trueOwner.role == .owner)
+        #expect(trueObserver.role == .observer)
+        #expect(trailingFalseOwner.role == .owner)
+
+        await query.succeed([])
+        _ = try await active.receipt.terminalValue()
+
+        try await query.waitForRequest(2)
+        await query.succeed([])
+        _ = try await falseOwner.receipt.terminalValue()
+        _ = try await falseObserver.receipt.terminalValue()
+
+        try await query.waitForRequest(3)
+        await query.succeed([])
+        _ = try await trueOwner.receipt.terminalValue()
+        _ = try await trueObserver.receipt.terminalValue()
+
+        try await query.waitForRequest(4)
+        await query.succeed([])
+        _ = try await trailingFalseOwner.receipt.terminalValue()
+
+        #expect(
+            await policies.snapshot() == [
+                "false", "false", "true", "false",
+            ])
         await coordinator.sealAndDrain()
     }
 }

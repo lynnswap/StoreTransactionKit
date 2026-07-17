@@ -13,11 +13,12 @@ package struct EntitlementRefreshReservation: Sendable {
 package actor EntitlementRefreshCoordinator {
     private struct PendingReservation: Sendable {
         let token: UInt64
+        let retryFailedTransactions: Bool
         let receipt: ProcessingReceipt<StoreEntitlements>
     }
 
     private let sessionID: UUID
-    private let query: @Sendable () async throws -> [StoreTransactionSnapshot]
+    private let query: @Sendable (Bool) async throws -> [StoreTransactionSnapshot]
     private let didChange: @Sendable (StoreEntitlements) async -> Void
     private var nextToken: UInt64 = 0
     private var current: StoreEntitlements?
@@ -28,7 +29,7 @@ package actor EntitlementRefreshCoordinator {
     package init(
         sessionID: UUID = UUID(),
         query:
-            @escaping @Sendable () async throws
+            @escaping @Sendable (Bool) async throws
             -> [StoreTransactionSnapshot],
         didChange: @escaping @Sendable (StoreEntitlements) async -> Void
     ) {
@@ -37,7 +38,9 @@ package actor EntitlementRefreshCoordinator {
         self.didChange = didChange
     }
 
-    package func reserve() -> EntitlementRefreshReservation {
+    package func reserve(
+        retryFailedTransactions: Bool = true
+    ) -> EntitlementRefreshReservation {
         guard acceptsReservations else {
             return EntitlementRefreshReservation(
                 receipt: .failed(
@@ -49,10 +52,15 @@ package actor EntitlementRefreshCoordinator {
         precondition(nextToken < .max)
         nextToken += 1
         let role: EntitlementRefreshReservation.Role =
-            pending.isEmpty ? .owner : .observer
+            pending.last?.retryFailedTransactions == retryFailedTransactions
+            ? .observer : .owner
         let receipt = ProcessingReceipt<StoreEntitlements>()
         pending.append(
-            PendingReservation(token: nextToken, receipt: receipt)
+            PendingReservation(
+                token: nextToken,
+                retryFailedTransactions: retryFailedTransactions,
+                receipt: receipt
+            )
         )
         startWorkerIfNeeded()
         return EntitlementRefreshReservation(receipt: receipt, role: role)
@@ -75,10 +83,17 @@ package actor EntitlementRefreshCoordinator {
 
     private func runQueries() async {
         while !pending.isEmpty {
-            let reservations = pending
-            pending.removeAll(keepingCapacity: true)
+            let retryFailedTransactions =
+                pending[0].retryFailedTransactions
+            let end =
+                pending.firstIndex {
+                    $0.retryFailedTransactions != retryFailedTransactions
+                } ?? pending.endIndex
+            let reservations = Array(pending[..<end])
+            pending.removeFirst(end)
             do {
-                let queried = try await query().sorted(by: Self.entitlementOrder)
+                let queried = try await query(retryFailedTransactions)
+                    .sorted(by: Self.entitlementOrder)
                 let published: StoreEntitlements
                 if let current, current.transactions == queried {
                     published = current

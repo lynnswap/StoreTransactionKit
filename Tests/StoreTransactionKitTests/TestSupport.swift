@@ -292,7 +292,6 @@ struct TestFailure: Error, Sendable, Equatable {}
 struct TestSourceFixture: Sendable {
     let source: StoreTransactionSource
     let updates: AsyncStream<StoreTransactionDelivery>.Continuation
-    let unfinished: AsyncStream<StoreTransactionDelivery>.Continuation
     let subscriptionStatusUpdates: AsyncStream<Void>.Continuation
     let updateTermination: TestSignal
     let subscriptionStatusDeliveryCount: TestSignal
@@ -315,7 +314,6 @@ struct TestSourceFixture: Sendable {
         synchronize: @escaping @Sendable () async throws -> Void = {}
     ) {
         let updatePair = AsyncStream<StoreTransactionDelivery>.makeStream()
-        let unfinishedPair = AsyncStream<StoreTransactionDelivery>.makeStream()
         let subscriptionStatusPair = AsyncStream<Void>.makeStream()
         let updateTermination = TestSignal()
         let subscriptionStatusDeliveryCount = TestSignal()
@@ -328,7 +326,6 @@ struct TestSourceFixture: Sendable {
             Task { await subscriptionStatusTermination.send() }
         }
         self.updates = updatePair.continuation
-        self.unfinished = unfinishedPair.continuation
         self.subscriptionStatusUpdates = subscriptionStatusPair.continuation
         self.updateTermination = updateTermination
         self.subscriptionStatusDeliveryCount = subscriptionStatusDeliveryCount
@@ -337,11 +334,6 @@ struct TestSourceFixture: Sendable {
         self.source = StoreTransactionSource(
             runUpdates: { consume in
                 for await delivery in updatePair.stream {
-                    await consume(delivery)
-                }
-            },
-            runUnfinished: { consume in
-                for await delivery in unfinishedPair.stream {
                     await consume(delivery)
                 }
             },

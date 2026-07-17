@@ -67,7 +67,9 @@ struct ReconciliationFixedPointTests {
             failures: failures
         )
 
-        let snapshots = try await reconciler.query()
+        let snapshots = try await reconciler.query(
+            retryFailedTransactions: false
+        )
 
         await core.finishInputAndDrain()
         await failures.sealAndDrain()
@@ -154,7 +156,9 @@ struct ReconciliationFixedPointTests {
             failures: failures
         )
 
-        let snapshots = try await reconciler.query()
+        let snapshots = try await reconciler.query(
+            retryFailedTransactions: false
+        )
 
         await core.finishInputAndDrain()
         await failures.sealAndDrain()
@@ -216,7 +220,9 @@ struct ReconciliationFixedPointTests {
         )
 
         do {
-            _ = try await reconciler.query()
+            _ = try await reconciler.query(
+                retryFailedTransactions: false
+            )
             Issue.record("A failed unfinished transaction unexpectedly reconciled.")
         } catch let owned as StoreTransactionFailureWithReportingOwner {
             #expect(owned.underlyingError is TestFailure)
@@ -227,7 +233,9 @@ struct ReconciliationFixedPointTests {
         #expect(await finishes.value() == 0)
         #expect(await reports.snapshot() == ["unfinished-44"])
 
-        let snapshots = try await reconciler.query()
+        let snapshots = try await reconciler.query(
+            retryFailedTransactions: true
+        )
 
         #expect(snapshots.isEmpty)
         #expect(await handlerCalls.value() == 2)
@@ -295,7 +303,9 @@ struct ReconciliationFixedPointTests {
             failures: failures
         )
 
-        let snapshots = try await reconciler.query()
+        let snapshots = try await reconciler.query(
+            retryFailedTransactions: false
+        )
 
         #expect(snapshots == [snapshot])
         #expect(await currentQueryCount.value() == 2)

@@ -28,7 +28,6 @@ package final class StoreTransactionRuntime: Sendable {
     private let producerCancellation = TaskCancellationBag()
     private let finiteTasks = TaskCompletionBag()
     private let updatesTask: Task<Void, Never>
-    private let unfinishedTask: Task<Void, Never>
     private let subscriptionStatusTask: Task<Void, Never>
 
     package init(
@@ -59,7 +58,11 @@ package final class StoreTransactionRuntime: Sendable {
         )
         let entitlements = EntitlementRefreshCoordinator(
             sessionID: sessionID,
-            query: currentEntitlements.query,
+            query: { retryFailedTransactions in
+                try await currentEntitlements.query(
+                    retryFailedTransactions: retryFailedTransactions
+                )
+            },
             didChange: entitlementsDidChange
         )
         let pipeline = StoreTransactionPipeline(
@@ -84,11 +87,6 @@ package final class StoreTransactionRuntime: Sendable {
                 await pipeline.processBackground(delivery, source: .updates)
             }
         }
-        self.unfinishedTask = Task.detached {
-            await source.runUnfinished { delivery in
-                await pipeline.processBackground(delivery, source: .unfinished)
-            }
-        }
         self.subscriptionStatusTask = Task.detached {
             await source.runSubscriptionStatusUpdates {
                 do {
@@ -104,7 +102,6 @@ package final class StoreTransactionRuntime: Sendable {
             }
         }
         producerCancellation.insert(updatesTask)
-        producerCancellation.insert(unfinishedTask)
         producerCancellation.insert(subscriptionStatusTask)
     }
 
@@ -113,20 +110,41 @@ package final class StoreTransactionRuntime: Sendable {
     }
 
     package func readiness() async throws -> StoreTransactionReadiness {
-        defer {
+        let reservation = await entitlements.reserve(
+            retryFailedTransactions: false
+        )
+        let completion = ProcessingReceipt<StoreTransactionReadiness>()
+        let core = core
+        let subscriptionStatusReadiness = subscriptionStatusReadiness
+        let readinessLease = readinessLease
+        let task = Task {
+            let result: Result<StoreTransactionReadiness, any Error>
+            do {
+                result = .success(
+                    StoreTransactionReadiness(
+                        entitlements: try await reservation.receipt.terminalValue()
+                    ))
+            } catch let owned as StoreTransactionFailureWithReportingOwner {
+                result = .failure(owned.underlyingError)
+            } catch {
+                result = .failure(error)
+            }
+            await core.completeInitialAttempt()
             subscriptionStatusReadiness.succeed(())
             readinessLease.end()
+            switch result {
+            case .success(let readiness):
+                completion.succeed(readiness)
+            case .failure(let error):
+                completion.fail(error)
+            }
         }
-        await unfinishedTask.value
-        let reservation = await entitlements.reserve()
+        finiteTasks.insert(task)
+
         do {
-            return StoreTransactionReadiness(
-                entitlements: try await reservation.receipt.value()
-            )
+            return try await completion.value()
         } catch is ProcessingReceiptWaiterCancellation {
             throw CancellationError()
-        } catch let owned as StoreTransactionFailureWithReportingOwner {
-            throw owned.underlyingError
         }
     }
 
@@ -176,7 +194,8 @@ package final class StoreTransactionRuntime: Sendable {
         let accepted:
             (
                 snapshot: StoreTransactionSnapshot,
-                acceptance: ProcessingAcceptance<StoreTransactionSnapshot>
+                acceptance: ProcessingAcceptance<StoreTransactionSnapshot>,
+                retryFailedTransactions: Bool
             )
         do {
             accepted = try await pipeline.accept(delivery)
@@ -204,7 +223,10 @@ package final class StoreTransactionRuntime: Sendable {
                 return
             }
 
-            let refresh = await entitlements.reserve()
+            let refresh = await entitlements.reserve(
+                retryFailedTransactions:
+                    accepted.retryFailedTransactions
+            )
             do {
                 _ = try await refresh.receipt.terminalValue()
                 operationReceipt.succeed(snapshot)
@@ -229,11 +251,15 @@ package final class StoreTransactionRuntime: Sendable {
     package func currentEntitlements(
         leases: FiniteOperationLeases
     ) async throws -> StoreEntitlements {
+        let retryFailedTransactions =
+            await core.retryFailedTransactionsInNewAttempt()
         let operationReceipt = ProcessingReceipt<StoreEntitlements>()
         let entitlements = entitlements
         let task = Task {
             defer { leases.work.end() }
-            let refresh = await entitlements.reserve()
+            let refresh = await entitlements.reserve(
+                retryFailedTransactions: retryFailedTransactions
+            )
             do {
                 operationReceipt.succeed(
                     try await refresh.receipt.terminalValue()
@@ -284,7 +310,11 @@ package final class StoreTransactionRuntime: Sendable {
     package func restorePurchases(
         leases: FiniteOperationLeases
     ) async throws -> StoreEntitlements {
-        let restore = await restoreCoordinator.reserve()
+        let retryFailedTransactions =
+            await core.retryFailedTransactionsInNewAttempt()
+        let restore = await restoreCoordinator.reserve(
+            retryFailedTransactions: retryFailedTransactions
+        )
         let operationReceipt = ProcessingReceipt<StoreEntitlements>()
         let task = Task {
             defer { leases.work.end() }
@@ -319,7 +349,6 @@ package final class StoreTransactionRuntime: Sendable {
     package func close() async {
         producerCancellation.cancel()
         await updatesTask.value
-        await unfinishedTask.value
         await subscriptionStatusTask.value
         await operations.stopAdmissionAndWait()
         await finiteTasks.waitForAll()

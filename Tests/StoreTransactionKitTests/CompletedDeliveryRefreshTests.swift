@@ -20,7 +20,7 @@ struct CompletedDeliveryRefreshTests {
             await handlerCalls.send()
         }
         let entitlements = EntitlementRefreshCoordinator(
-            query: { try await query.next() },
+            query: { _ in try await query.next() },
             didChange: { value in
                 await publications.append(UInt64(value.transactions.count))
             }

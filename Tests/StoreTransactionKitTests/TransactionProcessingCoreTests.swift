@@ -54,6 +54,8 @@ struct TransactionProcessingCoreTests {
         }
         #expect(await finishes.value() == 0)
 
+        await core.completeInitialAttempt()
+        #expect(await core.beginTransactionAttempt())
         let second = await core.accept(envelope)
         _ = try await second.receipt.terminalValue()
         #expect(first.role == .owner)

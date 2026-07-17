@@ -23,10 +23,6 @@ package struct StoreTransactionSource: Sendable {
         @Sendable (
             @Sendable (StoreTransactionDelivery) async -> Void
         ) async -> Void
-    package let runUnfinished:
-        @Sendable (
-            @Sendable (StoreTransactionDelivery) async -> Void
-        ) async -> Void
     package let runSubscriptionStatusUpdates:
         @Sendable (
             @Sendable () async -> Void
@@ -39,10 +35,6 @@ package struct StoreTransactionSource: Sendable {
 
     package init(
         runUpdates:
-            @escaping @Sendable (
-                @Sendable (StoreTransactionDelivery) async -> Void
-            ) async -> Void,
-        runUnfinished:
             @escaping @Sendable (
                 @Sendable (StoreTransactionDelivery) async -> Void
             ) async -> Void,
@@ -65,7 +57,6 @@ package struct StoreTransactionSource: Sendable {
             ) -> StoreTransactionDelivery
     ) {
         self.runUpdates = runUpdates
-        self.runUnfinished = runUnfinished
         self.runSubscriptionStatusUpdates = runSubscriptionStatusUpdates
         self.currentEntitlements = currentEntitlements
         self.queryUnfinished = queryUnfinished

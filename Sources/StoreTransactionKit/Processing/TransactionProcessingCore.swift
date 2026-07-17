@@ -4,6 +4,7 @@ package struct ProcessingAcceptance<Value: Sendable>: Sendable {
     package enum Role: Equatable, Sendable {
         case owner
         case inFlightObserver
+        case failedObserver
         case completedObserver
     }
 
@@ -21,9 +22,11 @@ package actor TransactionProcessingCore<Value: Sendable> {
     private let handle: @Sendable (Value) async throws -> Void
     private var queue: [QueuedOperation] = []
     private var inFlight: [Data: ProcessingReceipt<Value>] = [:]
+    private var failed: [Data: ProcessingReceipt<Value>] = [:]
     private var completed = CompletedRevisionCache()
     private var worker: Task<Void, Never>?
     private var acceptsInput = true
+    private var initialAttemptCompleted = false
 
     package init(
         sessionID: UUID = UUID(),
@@ -54,6 +57,12 @@ package actor TransactionProcessingCore<Value: Sendable> {
                 role: .inFlightObserver
             )
         }
+        if let receipt = failed[envelope.revision] {
+            return ProcessingAcceptance(
+                receipt: receipt,
+                role: .failedObserver
+            )
+        }
 
         let receipt = ProcessingReceipt<Value>()
         inFlight[envelope.revision] = receipt
@@ -62,12 +71,33 @@ package actor TransactionProcessingCore<Value: Sendable> {
         return ProcessingAcceptance(receipt: receipt, role: .owner)
     }
 
+    package func retryFailedTransactionsInNewAttempt() -> Bool {
+        initialAttemptCompleted
+    }
+
+    package func beginTransactionAttempt() -> Bool {
+        guard initialAttemptCompleted else {
+            return false
+        }
+        failed.removeAll(keepingCapacity: true)
+        return true
+    }
+
+    package func beginRetryAttempt() {
+        failed.removeAll(keepingCapacity: true)
+    }
+
+    package func completeInitialAttempt() {
+        initialAttemptCompleted = true
+    }
+
     package func finishInputAndDrain() async {
         acceptsInput = false
         let activeWorker = worker
         await activeWorker?.value
         precondition(queue.isEmpty)
         precondition(inFlight.isEmpty)
+        failed.removeAll(keepingCapacity: false)
     }
 
     private func startWorkerIfNeeded() {
@@ -96,6 +126,7 @@ package actor TransactionProcessingCore<Value: Sendable> {
                 operation.receipt.succeed(operation.envelope.value)
             } catch {
                 inFlight.removeValue(forKey: operation.envelope.revision)
+                failed[operation.envelope.revision] = operation.receipt
                 operation.receipt.fail(error)
             }
         }

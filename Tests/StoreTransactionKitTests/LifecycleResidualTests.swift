@@ -100,7 +100,7 @@ struct RestoreCoordinatorFailureTests {
         let synchronization = ControlledRestoreSynchronization()
         let entitlementQueryCount = TestSignal()
         let entitlements = EntitlementRefreshCoordinator(
-            query: {
+            query: { _ in
                 await entitlementQueryCount.send()
                 return []
             },
@@ -147,7 +147,6 @@ struct SessionClosingAdmissionTests {
         let fixture = TestSourceFixture(
             currentEntitlements: { try await query.next() }
         )
-        fixture.unfinished.finish()
         let session = StoreTransactionSession(
             source: fixture.source,
             handleTransaction: { _ in },

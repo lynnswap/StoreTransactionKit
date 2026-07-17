@@ -35,7 +35,12 @@ package final class CurrentEntitlementReconciler: Sendable {
         self.failures = failures
     }
 
-    package func query() async throws -> [StoreTransactionSnapshot] {
+    package func query(
+        retryFailedTransactions: Bool
+    ) async throws -> [StoreTransactionSnapshot] {
+        if retryFailedTransactions {
+            await core.beginRetryAttempt()
+        }
         var reconciledRevisions: Set<Data> = []
 
         while true {

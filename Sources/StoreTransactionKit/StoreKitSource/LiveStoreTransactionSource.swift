@@ -7,11 +7,6 @@ package extension StoreTransactionSource {
                 await consume(LiveTransactionAdapter.delivery(result))
             }
         },
-        runUnfinished: { consume in
-            for await result in Transaction.unfinished {
-                await consume(LiveTransactionAdapter.delivery(result))
-            }
-        },
         runSubscriptionStatusUpdates: { consume in
             for await _ in Product.SubscriptionInfo.Status.updates {
                 await consume()

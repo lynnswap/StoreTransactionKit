@@ -44,7 +44,6 @@ struct RuntimeContractTests {
     @Test("immediate purchase outcomes return their semantic values")
     func immediatePurchaseOutcomes() async throws {
         let fixture = TestSourceFixture()
-        fixture.unfinished.finish()
         let handlerCalls = TestSignal()
         let reports = StringRecorder()
         let session = StoreTransactionSession(
@@ -72,7 +71,6 @@ struct RuntimeContractTests {
     @Test("immediate purchase outcomes honor caller cancellation")
     func immediatePurchaseOutcomeCancellation() async throws {
         let fixture = TestSourceFixture()
-        fixture.unfinished.finish()
         let session = StoreTransactionSession(
             source: fixture.source,
             handleTransaction: { _ in },
@@ -103,7 +101,7 @@ struct RuntimeContractTests {
         let synchronizationGate = TestGate()
         let entitlementQueryCount = TestSignal()
         let entitlements = EntitlementRefreshCoordinator(
-            query: {
+            query: { _ in
                 await entitlementQueryCount.send()
                 return []
             },
@@ -147,7 +145,6 @@ struct RuntimeContractTests {
                 throw TestFailure()
             }
         )
-        fixture.unfinished.finish()
         let runtime = StoreTransactionRuntime(
             sessionID: UUID(),
             source: fixture.source,
@@ -200,7 +197,6 @@ struct RuntimeContractTests {
                 throw TestFailure()
             }
         )
-        fixture.unfinished.finish()
         let runtime = StoreTransactionRuntime(
             sessionID: UUID(),
             source: fixture.source,
@@ -250,7 +246,6 @@ struct RuntimeContractTests {
         let fixture = TestSourceFixture(
             currentEntitlements: { try await query.next() }
         )
-        fixture.unfinished.finish()
         let session = StoreTransactionSession(
             source: fixture.source,
             handleTransaction: { _ in },
@@ -289,7 +284,6 @@ struct RuntimeContractTests {
         let fixture = TestSourceFixture(
             queryUnfinished: { await unfinished.read() }
         )
-        fixture.unfinished.finish()
         let handlerCalls = TestSignal()
         let finishes = TestSignal()
         let reports = StringRecorder()
@@ -350,7 +344,6 @@ struct RuntimeContractTests {
         let fixture = TestSourceFixture(
             queryUnfinished: { await unfinished.read() }
         )
-        fixture.unfinished.finish()
         let handled = UInt64Recorder()
         let consumableAttempts = TestSignal()
         let directFinishes = TestSignal()
@@ -444,7 +437,6 @@ struct RuntimeContractTests {
             queryUnfinished: { await unfinished.read() },
             synchronize: { await synchronizations.send() }
         )
-        fixture.unfinished.finish()
         let handlerCalls = TestSignal()
         let finishes = TestSignal()
         let reports = StringRecorder()
@@ -505,7 +497,6 @@ struct RuntimeContractTests {
         let fixture = TestSourceFixture(
             queryUnfinished: { await unfinished.read() }
         )
-        fixture.unfinished.finish()
         let handlerStarted = TestSignal()
         let handlerGate = TestGate()
         let reported = TestSignal()
@@ -563,7 +554,6 @@ struct RuntimeContractTests {
             queryUnfinished: { await unfinished.read() },
             synchronize: { await synchronizations.send() }
         )
-        fixture.unfinished.finish()
         let handlerStarted = TestSignal()
         let handlerGate = TestGate()
         let reported = TestSignal()
@@ -639,7 +629,6 @@ struct RuntimeContractTests {
                 [older, lowerID, higherIDRevoked, newestSigned]
             }
         )
-        fixture.unfinished.finish()
         let session = StoreTransactionSession(
             source: fixture.source,
             handleTransaction: { _ in },
@@ -662,7 +651,6 @@ struct RuntimeContractTests {
         let fixture = TestSourceFixture(
             currentEntitlements: { try await query.next() }
         )
-        fixture.unfinished.finish()
         let session = StoreTransactionSession(
             source: fixture.source,
             handleTransaction: { _ in },
@@ -736,7 +724,7 @@ struct RuntimeContractTests {
         #expect(observer.role == .inFlightObserver)
 
         let entitlements = EntitlementRefreshCoordinator(
-            query: {
+            query: { _ in
                 try await reconciler.drain([
                     CurrentEntitlementReconciler.AcceptedTransaction(
                         snapshot: snapshot,
@@ -815,7 +803,9 @@ struct RuntimeContractTests {
             failures: failures
         )
 
-        let query = Task { try await reconciler.query() }
+        let query = Task {
+            try await reconciler.query(retryFailedTransactions: false)
+        }
         try await unfinishedQueryStarted.wait(for: 1)
         #expect(await entitlementQueryCount.value() == 1)
 
@@ -845,7 +835,7 @@ struct RuntimeContractTests {
             throw TestFailure()
         }
         let entitlements = EntitlementRefreshCoordinator(
-            query: {
+            query: { _ in
                 Issue.record("A failed transaction unexpectedly refreshed entitlements.")
                 return []
             },
@@ -920,7 +910,7 @@ struct RuntimeContractTests {
             throw TestFailure()
         }
         let entitlements = EntitlementRefreshCoordinator(
-            query: {
+            query: { _ in
                 Issue.record("A failed transaction unexpectedly refreshed entitlements.")
                 return []
             },
@@ -939,6 +929,7 @@ struct RuntimeContractTests {
         )
 
         await pipeline.processBackground(delivery, source: .updates)
+        await core.completeInitialAttempt()
         await pipeline.processBackground(delivery, source: .unfinished)
 
         #expect(await handlerCalls.value() == 2)
@@ -956,7 +947,6 @@ struct RuntimeContractTests {
         let reported = TestSignal()
         let reports = StringRecorder()
         let fixture = TestSourceFixture()
-        fixture.unfinished.finish()
         let runtime = StoreTransactionRuntime(
             sessionID: UUID(),
             source: fixture.source,
@@ -1007,7 +997,6 @@ struct RuntimeContractTests {
         let fixture = TestSourceFixture(
             currentEntitlements: { try await query.next() }
         )
-        fixture.unfinished.finish()
         let runtime = StoreTransactionRuntime(
             sessionID: UUID(),
             source: fixture.source,
@@ -1074,7 +1063,6 @@ struct RuntimeContractTests {
         let closeCallersStarted = TestSignal()
         let closeCallersFinished = TestSignal()
         let fixture = TestSourceFixture()
-        fixture.unfinished.finish()
         let session = StoreTransactionSession(
             source: fixture.source,
             handleTransaction: { _ in
