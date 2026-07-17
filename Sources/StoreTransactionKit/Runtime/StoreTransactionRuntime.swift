@@ -2,17 +2,6 @@ import StoreKit
 
 private struct DirectOperationFailure: Error {
     let underlyingError: any Error
-    let reportsWhenAbandoned: Bool
-
-    init(
-        propagating error: any Error,
-        reportsWhenAbandoned: Bool
-    ) {
-        let propagation = StoreTransactionFailurePropagation(error)
-        self.underlyingError = propagation.underlyingError
-        self.reportsWhenAbandoned =
-            reportsWhenAbandoned && !propagation.hasReportingOwner
-    }
 }
 
 package final class StoreTransactionRuntime: Sendable {
@@ -213,6 +202,10 @@ package final class StoreTransactionRuntime: Sendable {
             leases.observer.end()
             throw error
         }
+        let observation = DirectOperationObservation()
+        let transactionBinding = observation.bind(
+            to: accepted.acceptance.reportingAuthority
+        )
         let operationReceipt = ProcessingReceipt<StoreTransactionSnapshot>()
         let entitlements = entitlements
         let task = Task {
@@ -223,27 +216,40 @@ package final class StoreTransactionRuntime: Sendable {
                     .terminalValue()
             } catch {
                 operationReceipt.fail(
-                    DirectOperationFailure(
+                    await directFailure(
+                        observation: observation,
+                        binding: transactionBinding,
                         propagating: error,
                         reportsWhenAbandoned:
-                            accepted.acceptance.role == .owner
+                            accepted.acceptance.role == .owner,
+                        operation: .processPurchase,
+                        snapshot: accepted.snapshot
                     )
                 )
                 return
             }
+            observation.succeed(transactionBinding)
 
             let refresh = await entitlements.reserve(
                 retryFailedTransactions:
                     accepted.retryFailedTransactions
             )
+            let refreshBinding = observation.bind(
+                to: refresh.reportingAuthority
+            )
             do {
                 _ = try await refresh.receipt.terminalValue()
+                observation.succeed(refreshBinding)
                 operationReceipt.succeed(snapshot)
             } catch {
                 operationReceipt.fail(
-                    DirectOperationFailure(
+                    await directFailure(
+                        observation: observation,
+                        binding: refreshBinding,
                         propagating: error,
-                        reportsWhenAbandoned: refresh.role == .owner
+                        reportsWhenAbandoned: refresh.role == .owner,
+                        operation: .processPurchase,
+                        snapshot: accepted.snapshot
                     )
                 )
             }
@@ -251,8 +257,7 @@ package final class StoreTransactionRuntime: Sendable {
         finiteTasks.insert(task)
         return try await outcome(
             receipt: operationReceipt,
-            operation: .processPurchase,
-            snapshot: accepted.snapshot,
+            observation: observation,
             observerLease: leases.observer
         ) { .completed($0) }
     }
@@ -262,22 +267,29 @@ package final class StoreTransactionRuntime: Sendable {
     ) async throws -> StoreEntitlements {
         let retryFailedTransactions =
             await core.retryFailedTransactionsInNewAttempt()
+        let refresh = await entitlements.reserve(
+            retryFailedTransactions: retryFailedTransactions
+        )
+        let observation = DirectOperationObservation()
+        let binding = observation.bind(to: refresh.reportingAuthority)
         let operationReceipt = ProcessingReceipt<StoreEntitlements>()
-        let entitlements = entitlements
         let task = Task {
             defer { leases.work.end() }
-            let refresh = await entitlements.reserve(
-                retryFailedTransactions: retryFailedTransactions
-            )
             do {
+                let value = try await refresh.receipt.terminalValue()
+                observation.succeed(binding)
                 operationReceipt.succeed(
-                    try await refresh.receipt.terminalValue()
+                    value
                 )
             } catch {
                 operationReceipt.fail(
-                    DirectOperationFailure(
+                    await directFailure(
+                        observation: observation,
+                        binding: binding,
                         propagating: error,
-                        reportsWhenAbandoned: refresh.role == .owner
+                        reportsWhenAbandoned: refresh.role == .owner,
+                        operation: .currentEntitlements,
+                        snapshot: nil
                     )
                 )
             }
@@ -285,8 +297,7 @@ package final class StoreTransactionRuntime: Sendable {
         finiteTasks.insert(task)
         return try await outcome(
             receipt: operationReceipt,
-            operation: .currentEntitlements,
-            snapshot: nil,
+            observation: observation,
             observerLease: leases.observer
         ) { $0 }
     }
@@ -295,6 +306,10 @@ package final class StoreTransactionRuntime: Sendable {
         for productID: Product.ID,
         leases: FiniteOperationLeases
     ) async throws -> [StoreTransactionSnapshot] {
+        let observation = DirectOperationObservation()
+        let binding = observation.bind(
+            to: DirectOperationReportingAuthority()
+        )
         let operationReceipt = ProcessingReceipt<[StoreTransactionSnapshot]>()
         let source = source
         let task = Task {
@@ -302,16 +317,25 @@ package final class StoreTransactionRuntime: Sendable {
             do {
                 let snapshots = try await source.history(productID)
                     .sorted(by: Self.historyOrder)
+                observation.succeed(binding)
                 operationReceipt.succeed(snapshots)
             } catch {
-                operationReceipt.fail(error)
+                operationReceipt.fail(
+                    await directFailure(
+                        observation: observation,
+                        binding: binding,
+                        propagating: error,
+                        reportsWhenAbandoned: true,
+                        operation: .history,
+                        snapshot: nil
+                    )
+                )
             }
         }
         finiteTasks.insert(task)
         return try await outcome(
             receipt: operationReceipt,
-            operation: .history,
-            snapshot: nil,
+            observation: observation,
             observerLease: leases.observer
         ) { $0 }
     }
@@ -324,20 +348,39 @@ package final class StoreTransactionRuntime: Sendable {
         let restore = await restoreCoordinator.reserve(
             retryFailedTransactions: retryFailedTransactions
         )
+        let observation = DirectOperationObservation()
+        let restoreBinding = observation.bind(
+            to: restore.reportingAuthority
+        )
         let operationReceipt = ProcessingReceipt<StoreEntitlements>()
         let task = Task {
             defer { leases.work.end() }
             do {
+                let value = try await restore.receipt.terminalValue()
+                observation.succeed(restoreBinding)
                 operationReceipt.succeed(
-                    try await restore.receipt.terminalValue()
+                    value
                 )
             } catch let failure as RestoreCoordinatorFailure {
+                let failureBinding: DirectOperationObservation.Binding
+                if failure.reportingAuthority === restore.reportingAuthority {
+                    failureBinding = restoreBinding
+                } else {
+                    observation.succeed(restoreBinding)
+                    failureBinding = observation.bind(
+                        to: failure.reportingAuthority
+                    )
+                }
                 operationReceipt.fail(
-                    DirectOperationFailure(
+                    await directFailure(
+                        observation: observation,
+                        binding: failureBinding,
                         propagating: failure.underlyingError,
                         reportsWhenAbandoned:
                             restore.role == .owner
-                            && failure.reportsWhenAbandoned
+                            && failure.reportsWhenAbandoned,
+                        operation: .restorePurchases,
+                        snapshot: nil
                     )
                 )
             } catch {
@@ -349,8 +392,7 @@ package final class StoreTransactionRuntime: Sendable {
         finiteTasks.insert(task)
         return try await outcome(
             receipt: operationReceipt,
-            operation: .restorePurchases,
-            snapshot: nil,
+            observation: observation,
             observerLease: leases.observer
         ) { $0 }
     }
@@ -374,50 +416,58 @@ package final class StoreTransactionRuntime: Sendable {
 
     private func outcome<Value: Sendable, Output>(
         receipt: ProcessingReceipt<Value>,
-        operation: StoreTransactionOperation,
-        snapshot: StoreTransactionSnapshot?,
+        observation: DirectOperationObservation,
         observerLease: FiniteOperationLease,
         transform: (Value) -> Output
     ) async throws -> Output {
         do {
             let value = try await receipt.value()
+            observation.deliver()
             observerLease.end()
             return transform(value)
         } catch is ProcessingReceiptWaiterCancellation {
-            let failures = failures
-            let task = Task {
-                defer { observerLease.end() }
-                do {
-                    _ = try await receipt.terminalValue()
-                } catch let failure as DirectOperationFailure {
-                    guard failure.reportsWhenAbandoned else { return }
-                    await failures.enqueue(
-                        StoreTransactionBackgroundFailure(
-                            source: .abandonedDirectOperation(operation),
-                            transactionID: snapshot?.id,
-                            productID: snapshot?.productID,
-                            underlyingError: failure.underlyingError
-                        )
-                    )
-                } catch {
-                    await failures.enqueue(
-                        StoreTransactionBackgroundFailure(
-                            source: .abandonedDirectOperation(operation),
-                            transactionID: snapshot?.id,
-                            productID: snapshot?.productID,
-                            underlyingError: error
-                        ))
-                }
+            if let report = observation.abandon() {
+                await failures.enqueue(report)
             }
-            finiteTasks.insert(task)
+            observerLease.end()
             throw CancellationError()
         } catch let failure as DirectOperationFailure {
+            observation.deliver()
             observerLease.end()
             throw failure.underlyingError
         } catch {
+            observation.deliver()
             observerLease.end()
             throw error
         }
+    }
+
+    private func directFailure(
+        observation: DirectOperationObservation,
+        binding: DirectOperationObservation.Binding,
+        propagating error: any Error,
+        reportsWhenAbandoned: Bool,
+        operation: StoreTransactionOperation,
+        snapshot: StoreTransactionSnapshot?
+    ) async -> DirectOperationFailure {
+        let propagation = StoreTransactionFailurePropagation(error)
+        let report: StoreTransactionBackgroundFailure?
+        if reportsWhenAbandoned && !propagation.hasReportingOwner {
+            report = StoreTransactionBackgroundFailure(
+                source: .abandonedDirectOperation(operation),
+                transactionID: snapshot?.id,
+                productID: snapshot?.productID,
+                underlyingError: propagation.underlyingError
+            )
+        } else {
+            report = nil
+        }
+        if let claimed = observation.fail(binding, report: report) {
+            await failures.enqueue(claimed)
+        }
+        return DirectOperationFailure(
+            underlyingError: propagation.underlyingError
+        )
     }
 
     package static func historyOrder(

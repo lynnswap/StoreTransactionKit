@@ -117,6 +117,7 @@ struct RestoreCoordinatorFailureTests {
         #expect(first.role == .owner)
         #expect(second.role == .observer)
         #expect(first.receipt === second.receipt)
+        #expect(first.reportingAuthority === second.reportingAuthority)
 
         await synchronization.releaseFirstAttempt()
         await #expect(throws: RestoreCoordinatorFailure.self) {
@@ -129,6 +130,7 @@ struct RestoreCoordinatorFailureTests {
         let retry = await coordinator.reserve()
         #expect(retry.role == .owner)
         #expect(retry.receipt !== first.receipt)
+        #expect(retry.reportingAuthority !== first.reportingAuthority)
         try await synchronization.waitForAttempt(2)
         let value = try await retry.receipt.terminalValue()
 

@@ -10,19 +10,25 @@ package struct ProcessingAcceptance<Value: Sendable>: Sendable {
 
     package let receipt: ProcessingReceipt<Value>
     package let role: Role
+    package let reportingAuthority: DirectOperationReportingAuthority
 }
 
 package actor TransactionProcessingCore<Value: Sendable> {
+    private struct Attempt: Sendable {
+        let receipt: ProcessingReceipt<Value>
+        let reportingAuthority: DirectOperationReportingAuthority
+    }
+
     private struct QueuedOperation: Sendable {
         let envelope: ProcessingEnvelope<Value>
-        let receipt: ProcessingReceipt<Value>
+        let attempt: Attempt
     }
 
     private let sessionID: UUID
     private let handle: @Sendable (Value) async throws -> Void
     private var queue: [QueuedOperation] = []
-    private var inFlight: [Data: ProcessingReceipt<Value>] = [:]
-    private var failed: [Data: ProcessingReceipt<Value>] = [:]
+    private var inFlight: [Data: Attempt] = [:]
+    private var failed: [Data: Attempt] = [:]
     private var completed = CompletedRevisionCache()
     private var worker: Task<Void, Never>?
     private var acceptsInput = true
@@ -42,33 +48,44 @@ package actor TransactionProcessingCore<Value: Sendable> {
         guard acceptsInput else {
             return ProcessingAcceptance(
                 receipt: .failed(StoreTransactionInternalError.inputClosed),
-                role: .owner
+                role: .owner,
+                reportingAuthority: DirectOperationReportingAuthority()
             )
         }
         if completed.contains(envelope.revision) {
             return ProcessingAcceptance(
                 receipt: .succeeded(envelope.value),
-                role: .completedObserver
+                role: .completedObserver,
+                reportingAuthority: DirectOperationReportingAuthority()
             )
         }
-        if let receipt = inFlight[envelope.revision] {
+        if let attempt = inFlight[envelope.revision] {
             return ProcessingAcceptance(
-                receipt: receipt,
-                role: .inFlightObserver
+                receipt: attempt.receipt,
+                role: .inFlightObserver,
+                reportingAuthority: attempt.reportingAuthority
             )
         }
-        if let receipt = failed[envelope.revision] {
+        if let attempt = failed[envelope.revision] {
             return ProcessingAcceptance(
-                receipt: receipt,
-                role: .failedObserver
+                receipt: attempt.receipt,
+                role: .failedObserver,
+                reportingAuthority: attempt.reportingAuthority
             )
         }
 
-        let receipt = ProcessingReceipt<Value>()
-        inFlight[envelope.revision] = receipt
-        queue.append(QueuedOperation(envelope: envelope, receipt: receipt))
+        let attempt = Attempt(
+            receipt: ProcessingReceipt<Value>(),
+            reportingAuthority: DirectOperationReportingAuthority()
+        )
+        inFlight[envelope.revision] = attempt
+        queue.append(QueuedOperation(envelope: envelope, attempt: attempt))
         startWorkerIfNeeded()
-        return ProcessingAcceptance(receipt: receipt, role: .owner)
+        return ProcessingAcceptance(
+            receipt: attempt.receipt,
+            role: .owner,
+            reportingAuthority: attempt.reportingAuthority
+        )
     }
 
     package func retryFailedTransactionsInNewAttempt() -> Bool {
@@ -123,11 +140,11 @@ package actor TransactionProcessingCore<Value: Sendable> {
                 await operation.envelope.finish()
                 completed.insert(operation.envelope.revision)
                 inFlight.removeValue(forKey: operation.envelope.revision)
-                operation.receipt.succeed(operation.envelope.value)
+                operation.attempt.receipt.succeed(operation.envelope.value)
             } catch {
                 inFlight.removeValue(forKey: operation.envelope.revision)
-                failed[operation.envelope.revision] = operation.receipt
-                operation.receipt.fail(error)
+                failed[operation.envelope.revision] = operation.attempt
+                operation.attempt.receipt.fail(error)
             }
         }
         worker = nil

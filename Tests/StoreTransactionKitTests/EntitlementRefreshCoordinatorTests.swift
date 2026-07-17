@@ -109,6 +109,8 @@ struct EntitlementRefreshCoordinatorTests {
         #expect(active.role == .owner)
         #expect(nextOwner.role == .owner)
         #expect(nextObserver.role == .observer)
+        #expect(active.reportingAuthority !== nextOwner.reportingAuthority)
+        #expect(nextOwner.reportingAuthority === nextObserver.reportingAuthority)
 
         await query.succeed([])
         _ = try await active.receipt.terminalValue()

@@ -9,6 +9,7 @@ package struct EntitlementRefreshReservation: Sendable {
     package let receipt: ProcessingReceipt<StoreEntitlements>
     package let role: Role
     package let token: UInt64
+    package let reportingAuthority: DirectOperationReportingAuthority
 }
 
 package struct EntitlementRefreshSuccess: Sendable {
@@ -21,6 +22,7 @@ package actor EntitlementRefreshCoordinator {
         let token: UInt64
         let retryFailedTransactions: Bool
         let receipt: ProcessingReceipt<StoreEntitlements>
+        let reportingAuthority: DirectOperationReportingAuthority
     }
 
     private let sessionID: UUID
@@ -57,27 +59,38 @@ package actor EntitlementRefreshCoordinator {
                     StoreTransactionInternalError.entitlementRefreshClosed
                 ),
                 role: .owner,
-                token: 0
+                token: 0,
+                reportingAuthority: DirectOperationReportingAuthority()
             )
         }
         precondition(nextToken < .max)
         nextToken += 1
-        let role: EntitlementRefreshReservation.Role =
-            pending.last?.retryFailedTransactions == retryFailedTransactions
-            ? .observer : .owner
+        let role: EntitlementRefreshReservation.Role
+        let reportingAuthority: DirectOperationReportingAuthority
+        if let preceding = pending.last,
+            preceding.retryFailedTransactions == retryFailedTransactions
+        {
+            role = .observer
+            reportingAuthority = preceding.reportingAuthority
+        } else {
+            role = .owner
+            reportingAuthority = DirectOperationReportingAuthority()
+        }
         let receipt = ProcessingReceipt<StoreEntitlements>()
         pending.append(
             PendingReservation(
                 token: nextToken,
                 retryFailedTransactions: retryFailedTransactions,
-                receipt: receipt
+                receipt: receipt,
+                reportingAuthority: reportingAuthority
             )
         )
         startWorkerIfNeeded()
         return EntitlementRefreshReservation(
             receipt: receipt,
             role: role,
-            token: nextToken
+            token: nextToken,
+            reportingAuthority: reportingAuthority
         )
     }
 

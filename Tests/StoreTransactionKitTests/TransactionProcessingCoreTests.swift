@@ -109,6 +109,8 @@ struct TransactionProcessingCoreTests {
         #expect(first.role == .owner)
         #expect(duplicate.role == .inFlightObserver)
         #expect(completed.role == .completedObserver)
+        #expect(first.reportingAuthority === duplicate.reportingAuthority)
+        #expect(first.reportingAuthority !== completed.reportingAuthority)
         #expect(await handles.value() == 1)
         #expect(await firstFinish.value() == 1)
         #expect(await duplicateFinish.value() == 0)

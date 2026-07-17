@@ -6,20 +6,24 @@ package struct RestoreReservation: Sendable {
 
     package let receipt: ProcessingReceipt<StoreEntitlements>
     package let role: Role
+    package let reportingAuthority: DirectOperationReportingAuthority
 }
 
 package struct RestoreCoordinatorFailure: Error {
     package let underlyingError: any Error
     package let reportsWhenAbandoned: Bool
+    package let reportingAuthority: DirectOperationReportingAuthority
 
     package init(
         propagating error: any Error,
-        reportsWhenAbandoned: Bool
+        reportsWhenAbandoned: Bool,
+        reportingAuthority: DirectOperationReportingAuthority
     ) {
         let propagation = StoreTransactionFailurePropagation(error)
         self.underlyingError = propagation.underlyingError
         self.reportsWhenAbandoned =
             reportsWhenAbandoned && !propagation.hasReportingOwner
+        self.reportingAuthority = reportingAuthority
     }
 }
 
@@ -27,6 +31,7 @@ package actor RestoreCoordinator {
     private struct InFlight: Sendable {
         let id: UInt64
         let receipt: ProcessingReceipt<StoreEntitlements>
+        let reportingAuthority: DirectOperationReportingAuthority
         let task: Task<Void, Never>
     }
 
@@ -49,7 +54,8 @@ package actor RestoreCoordinator {
         if let inFlight {
             return RestoreReservation(
                 receipt: inFlight.receipt,
-                role: .observer
+                role: .observer,
+                reportingAuthority: inFlight.reportingAuthority
             )
         }
 
@@ -57,6 +63,7 @@ package actor RestoreCoordinator {
         nextID += 1
         let id = nextID
         let receipt = ProcessingReceipt<StoreEntitlements>()
+        let reportingAuthority = DirectOperationReportingAuthority()
         let synchronize = synchronize
         let entitlements = entitlements
         let task = Task.detached { [weak self] in
@@ -69,7 +76,8 @@ package actor RestoreCoordinator {
                     result: .failure(
                         RestoreCoordinatorFailure(
                             propagating: error,
-                            reportsWhenAbandoned: true
+                            reportsWhenAbandoned: true,
+                            reportingAuthority: reportingAuthority
                         ))
                 )
                 return
@@ -84,13 +92,23 @@ package actor RestoreCoordinator {
                 result = .failure(
                     RestoreCoordinatorFailure(
                         propagating: error,
-                        reportsWhenAbandoned: refresh.role == .owner
+                        reportsWhenAbandoned: refresh.role == .owner,
+                        reportingAuthority: refresh.reportingAuthority
                     ))
             }
             await self?.complete(id: id, result: result)
         }
-        inFlight = InFlight(id: id, receipt: receipt, task: task)
-        return RestoreReservation(receipt: receipt, role: .owner)
+        inFlight = InFlight(
+            id: id,
+            receipt: receipt,
+            reportingAuthority: reportingAuthority,
+            task: task
+        )
+        return RestoreReservation(
+            receipt: receipt,
+            role: .owner,
+            reportingAuthority: reportingAuthority
+        )
     }
 
     private func complete(
