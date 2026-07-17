@@ -21,8 +21,9 @@ The serialized suite covers:
 - empty, existing-entitlement, and failed-then-retried restores
 - Ask to Buy approval and decline
 
-Run the suite on an installed iOS Simulator. StoreKit Test owns one environment
-per process, so parallel test execution must remain disabled.
+The host app and test bundle support iOS, tvOS, watchOS, and visionOS. Run the
+StoreKit runtime suite on an installed iOS Simulator. StoreKit Test owns one
+environment per process, so parallel test execution must remain disabled.
 
 ```sh
 xcodebuild test \
@@ -32,14 +33,32 @@ xcodebuild test \
   -parallel-testing-enabled NO
 ```
 
+Cross-build the complete app-hosted test bundle for the additional platforms:
+
+```sh
+for destination in \
+  'generic/platform=tvOS Simulator' \
+  'generic/platform=watchOS Simulator' \
+  'generic/platform=visionOS Simulator'
+do
+  xcodebuild build-for-testing \
+    -workspace Tools/TestApp/StoreTransactionKitTestApp.xcworkspace \
+    -scheme StoreTransactionKitIntegrationTests \
+    -destination "$destination" \
+    CODE_SIGNING_ALLOWED=NO \
+    CODE_SIGNING_REQUIRED=NO
+done
+```
+
 The tests wait for observable state changes with cancellation-aware event
 signals. They don't use fixed sleeps or accelerated wall-clock time. A suite
 time limit exists only to surface a missing event as a failed test instead of
 hanging the test process.
 
 CI runs this suite with Xcode 26.5 on the iOS 26.2 simulator available in the
-GitHub macOS 26 image. The same suite is also validated locally with Xcode 26.5
-on iOS 18.6 to cover the supported iOS 18 line.
+GitHub macOS 26 image. CI also cross-builds the app host and test bundle for
+tvOS, watchOS, and visionOS simulators. The same runtime suite is validated
+locally with Xcode 26.5 on iOS 18.6 to cover the supported iOS 18 line.
 
 Local StoreKit testing doesn't validate App Store Connect configuration,
 App Store Server Notifications, cross-device propagation, Family Sharing or

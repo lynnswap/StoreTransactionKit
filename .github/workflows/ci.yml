@@ -77,6 +77,14 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
 
+      - name: Build for Mac Catalyst
+        run: |
+          xcodebuild build \
+            -scheme StoreTransactionKit \
+            -destination 'generic/platform=macOS,variant=Mac Catalyst' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
       - name: Build DocC archive
         run: |
           xcodebuild docbuild \
@@ -94,6 +102,56 @@ jobs:
             exit 1
           fi
           swift build --build-system swiftbuild
+
+  supported-platform-builds:
+    name: Test Build (${{ matrix.name }})
+    runs-on: macos-26
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: tvOS Simulator
+            destination: generic/platform=tvOS Simulator
+            slug: tvos
+          - name: watchOS Simulator
+            destination: generic/platform=watchOS Simulator
+            slug: watchos
+          - name: visionOS Simulator
+            destination: generic/platform=visionOS Simulator
+            slug: visionos
+    env:
+      XCODE_VERSION: "26.5"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: |
+          xcode_app="/Applications/Xcode_${XCODE_VERSION}.app"
+          if [[ ! -d "${xcode_app}" ]]; then
+            echo "Xcode ${XCODE_VERSION} is not installed on the runner." >&2
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=${xcode_app}/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Selected Xcode: ${xcode_app}"
+
+      - name: Show Xcode environment
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Build app-hosted tests
+        run: |
+          xcodebuild build-for-testing \
+            -workspace Tools/TestApp/StoreTransactionKitTestApp.xcworkspace \
+            -scheme StoreTransactionKitIntegrationTests \
+            -destination '${{ matrix.destination }}' \
+            -derivedDataPath ".build/${{ matrix.slug }}-ci" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
 
   ios-tests:
     name: Package Tests (iOS Simulator)

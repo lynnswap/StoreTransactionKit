@@ -6,7 +6,11 @@ let package = Package(
     name: "StoreTransactionKitExternalConsumer",
     platforms: [
         .iOS("18.4"),
+        .macCatalyst("18.4"),
         .macOS("15.4"),
+        .tvOS("18.4"),
+        .watchOS("11.4"),
+        .visionOS("2.4"),
     ],
     dependencies: [
         .package(path: "../..")
