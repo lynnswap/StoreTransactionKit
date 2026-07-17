@@ -8,6 +8,12 @@ package struct EntitlementRefreshReservation: Sendable {
 
     package let receipt: ProcessingReceipt<StoreEntitlements>
     package let role: Role
+    package let token: UInt64
+}
+
+package struct EntitlementRefreshSuccess: Sendable {
+    package let token: UInt64
+    package let entitlements: StoreEntitlements
 }
 
 package actor EntitlementRefreshCoordinator {
@@ -20,6 +26,7 @@ package actor EntitlementRefreshCoordinator {
     private let sessionID: UUID
     private let query: @Sendable (Bool) async throws -> [StoreTransactionSnapshot]
     private let didChange: @Sendable (StoreEntitlements) async -> Void
+    private let didSucceed: @Sendable (EntitlementRefreshSuccess) async -> Void
     private var nextToken: UInt64 = 0
     private var current: StoreEntitlements?
     private var pending: [PendingReservation] = []
@@ -31,11 +38,14 @@ package actor EntitlementRefreshCoordinator {
         query:
             @escaping @Sendable (Bool) async throws
             -> [StoreTransactionSnapshot],
-        didChange: @escaping @Sendable (StoreEntitlements) async -> Void
+        didChange: @escaping @Sendable (StoreEntitlements) async -> Void,
+        didSucceed:
+            @escaping @Sendable (EntitlementRefreshSuccess) async -> Void = { _ in }
     ) {
         self.sessionID = sessionID
         self.query = query
         self.didChange = didChange
+        self.didSucceed = didSucceed
     }
 
     package func reserve(
@@ -46,7 +56,8 @@ package actor EntitlementRefreshCoordinator {
                 receipt: .failed(
                     StoreTransactionInternalError.entitlementRefreshClosed
                 ),
-                role: .owner
+                role: .owner,
+                token: 0
             )
         }
         precondition(nextToken < .max)
@@ -63,7 +74,11 @@ package actor EntitlementRefreshCoordinator {
             )
         )
         startWorkerIfNeeded()
-        return EntitlementRefreshReservation(receipt: receipt, role: role)
+        return EntitlementRefreshReservation(
+            receipt: receipt,
+            role: role,
+            token: nextToken
+        )
     }
 
     package func sealAndDrain() async {
@@ -109,6 +124,11 @@ package actor EntitlementRefreshCoordinator {
                         await didChange(published)
                     }
                 }
+                await didSucceed(
+                    EntitlementRefreshSuccess(
+                        token: reservations.last!.token,
+                        entitlements: published
+                    ))
                 for reservation in reservations {
                     reservation.receipt.succeed(published)
                 }

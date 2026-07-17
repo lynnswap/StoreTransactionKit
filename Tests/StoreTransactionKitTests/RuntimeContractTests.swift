@@ -5,6 +5,53 @@ import Testing
 
 @Suite("Runtime contracts", .timeLimit(.minutes(1)))
 struct RuntimeContractTests {
+    @Test("refresh success and readiness failure preserve their physical order")
+    func readinessFailureOrdering() async throws {
+        let query = ControlledEntitlementQuery()
+        let successfulTokens = UInt64Recorder()
+        let fixture = TestSourceFixture(
+            currentEntitlements: { try await query.next() }
+        )
+        let runtime = StoreTransactionRuntime(
+            sessionID: UUID(),
+            source: fixture.source,
+            handleTransaction: { _ in },
+            entitlementsDidChange: { _ in },
+            entitlementRefreshDidSucceed: { success in
+                await successfulTokens.append(success.token)
+            },
+            reportFailure: { _ in }
+        )
+        fixture.updates.yield(
+            .verified(
+                makeEnvelope(
+                    snapshot: makeSnapshot(
+                        id: 91,
+                        productType: .nonConsumable
+                    )
+                )
+            )
+        )
+
+        try await query.waitForRequest(1)
+        let readiness = Task { try await runtime.readiness() }
+        await query.succeed([makeSnapshot(id: 91, productType: .nonConsumable)])
+        try await query.waitForRequest(2)
+        await query.fail(TestFailure())
+
+        do {
+            _ = try await readiness.value
+            Issue.record("Readiness unexpectedly succeeded.")
+        } catch let failure as StoreTransactionReadinessFailure {
+            #expect(failure.refreshToken == 2)
+            #expect(failure.underlyingError is TestFailure)
+        } catch {
+            Issue.record("Unexpected readiness failure: \(error)")
+        }
+        #expect(await successfulTokens.snapshot() == [1])
+        await runtime.close()
+    }
+
     @Test("receipt waiter cancellation is distinct from terminal cancellation failure")
     func receiptCancellationIdentity() async throws {
         let terminalFailure = ProcessingReceipt<Void>()

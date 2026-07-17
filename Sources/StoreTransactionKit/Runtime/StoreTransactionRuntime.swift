@@ -37,6 +37,8 @@ package final class StoreTransactionRuntime: Sendable {
             @escaping @Sendable (StoreTransactionSnapshot) async throws -> Void,
         entitlementsDidChange:
             @escaping @Sendable (StoreEntitlements) async -> Void,
+        entitlementRefreshDidSucceed:
+            @escaping @Sendable (EntitlementRefreshSuccess) async -> Void = { _ in },
         reportFailure:
             @escaping @Sendable (StoreTransactionBackgroundFailure) async -> Void
     ) {
@@ -63,7 +65,8 @@ package final class StoreTransactionRuntime: Sendable {
                     retryFailedTransactions: retryFailedTransactions
                 )
             },
-            didChange: entitlementsDidChange
+            didChange: entitlementsDidChange,
+            didSucceed: entitlementRefreshDidSucceed
         )
         let pipeline = StoreTransactionPipeline(
             core: core,
@@ -122,7 +125,8 @@ package final class StoreTransactionRuntime: Sendable {
             do {
                 result = .success(
                     StoreTransactionReadiness(
-                        entitlements: try await reservation.receipt.terminalValue()
+                        entitlements: try await reservation.receipt.terminalValue(),
+                        refreshToken: reservation.token
                     ))
             } catch let owned as StoreTransactionFailureWithReportingOwner {
                 result = .failure(owned.underlyingError)
@@ -136,7 +140,12 @@ package final class StoreTransactionRuntime: Sendable {
             case .success(let readiness):
                 completion.succeed(readiness)
             case .failure(let error):
-                completion.fail(error)
+                completion.fail(
+                    StoreTransactionReadinessFailure(
+                        refreshToken: reservation.token,
+                        underlyingError: error
+                    )
+                )
             }
         }
         finiteTasks.insert(task)

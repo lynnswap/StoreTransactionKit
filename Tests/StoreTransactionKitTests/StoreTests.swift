@@ -9,6 +9,41 @@ struct StoreTests {
         case yearly = "subscription.yearly"
     }
 
+    @Test("a later startup failure is preserved after an earlier success")
+    func startupFailureAfterSuccess() {
+        var ordering = TransactionStoreStartupOrdering()
+
+        let clearedBySuccess = ordering.recordSuccess(token: 1)
+        let recordedFailure = ordering.recordFailure(token: 2)
+
+        #expect(!clearedBySuccess)
+        #expect(recordedFailure)
+    }
+
+    @Test("a later success clears an earlier startup failure")
+    func successAfterStartupFailure() {
+        var ordering = TransactionStoreStartupOrdering()
+
+        let recordedFailure = ordering.recordFailure(token: 1)
+        let clearedBySuccess = ordering.recordSuccess(token: 2)
+
+        #expect(recordedFailure)
+        #expect(clearedBySuccess)
+    }
+
+    @Test("only a success later than the failed readiness boundary recovers startup")
+    func sequencedStartupRecovery() {
+        var ordering = TransactionStoreStartupOrdering()
+
+        let clearedBeforeFailure = ordering.recordSuccess(token: 1)
+        let recordedFailure = ordering.recordFailure(token: 2)
+        let clearedAfterFailure = ordering.recordSuccess(token: 3)
+
+        #expect(!clearedBeforeFailure)
+        #expect(recordedFailure)
+        #expect(clearedAfterFailure)
+    }
+
     @Test("app-defined identifiers project current entitlements")
     func typedEntitlementProjection() async throws {
         let values = EntitlementValueSource([

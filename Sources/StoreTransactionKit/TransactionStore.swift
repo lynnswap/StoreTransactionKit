@@ -58,6 +58,7 @@ where
     @ObservationIgnored private let transactionSession: StoreTransactionSession
     @ObservationIgnored private let startupCompletion: ProcessingReceipt<Void>
     @ObservationIgnored private var startupTask: Task<Void, Never>?
+    @ObservationIgnored private var startupOrdering = TransactionStoreStartupOrdering()
 
     /// Creates and starts an observable StoreKit store.
     ///
@@ -99,8 +100,9 @@ where
             sessionID: sessionID,
             source: source,
             handleTransaction: handleTransaction,
-            entitlementsDidChange: { entitlements in
-                await owner.apply(entitlements)
+            entitlementsDidChange: { _ in },
+            entitlementRefreshDidSucceed: { success in
+                await owner.apply(success)
             },
             reportFailure: reportFailure
         )
@@ -112,13 +114,18 @@ where
         startupTask = Task { [weak self, transactionSession] in
             defer { startupCompletion.succeed(()) }
             do {
-                _ = try await transactionSession.start()
+                _ = try await transactionSession.startForTransactionStore()
+            } catch let failure as StoreTransactionReadinessFailure {
+                guard !Task.isCancelled else { return }
+                self?.applyStartupFailure(
+                    token: failure.refreshToken,
+                    error: failure.underlyingError
+                )
             } catch {
                 // Explicit close cancels only this readiness waiter. The
                 // session's close operation owns draining accepted work.
-                guard !Task.isCancelled, self?.entitlements == nil else {
-                    return
-                }
+                guard !Task.isCancelled else { return }
+                self?.startupOrdering.recordUnsequencedFailure()
                 self?.startupError = error
             }
         }
@@ -193,9 +200,20 @@ where
         startupTask = nil
     }
 
-    fileprivate func apply(_ entitlements: StoreEntitlements) {
-        self.entitlements = entitlements
-        startupError = nil
+    fileprivate func apply(_ success: EntitlementRefreshSuccess) {
+        entitlements = success.entitlements
+        if startupOrdering.recordSuccess(token: success.token) {
+            startupError = nil
+        }
+    }
+
+    private func applyStartupFailure(
+        token: UInt64,
+        error: any Error
+    ) {
+        if startupOrdering.recordFailure(token: token) {
+            startupError = error
+        }
     }
 
     private func waitForStartupAttempt(
@@ -229,6 +247,29 @@ where
     }
 }
 
+package struct TransactionStoreStartupOrdering: Sendable {
+    private var latestSuccessfulToken: UInt64 = 0
+    private var failureToken: UInt64?
+
+    package mutating func recordSuccess(token: UInt64) -> Bool {
+        precondition(token > latestSuccessfulToken)
+        latestSuccessfulToken = token
+        guard let failureToken, token > failureToken else { return false }
+        self.failureToken = nil
+        return true
+    }
+
+    package mutating func recordFailure(token: UInt64) -> Bool {
+        guard latestSuccessfulToken < token else { return false }
+        failureToken = token
+        return true
+    }
+
+    package mutating func recordUnsequencedFailure() {
+        failureToken = latestSuccessfulToken
+    }
+}
+
 @MainActor
 private final class TransactionStoreOwner<EntitlementID>: Sendable
 where
@@ -237,7 +278,7 @@ where
 {
     weak var store: TransactionStore<EntitlementID>?
 
-    func apply(_ entitlements: StoreEntitlements) {
-        store?.apply(entitlements)
+    func apply(_ success: EntitlementRefreshSuccess) {
+        store?.apply(success)
     }
 }

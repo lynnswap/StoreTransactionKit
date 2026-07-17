@@ -37,10 +37,14 @@ struct EntitlementRefreshCoordinatorTests {
     func equalContentDoesNotPublish() async throws {
         let query = ControlledEntitlementQuery()
         let publicationSizes = UInt64Recorder()
+        let successfulTokens = UInt64Recorder()
         let coordinator = EntitlementRefreshCoordinator(
             query: { _ in try await query.next() },
             didChange: { value in
                 await publicationSizes.append(UInt64(value.transactions.count))
+            },
+            didSucceed: { success in
+                await successfulTokens.append(success.token)
             }
         )
         let snapshot = makeSnapshot(id: 4)
@@ -57,6 +61,7 @@ struct EntitlementRefreshCoordinatorTests {
 
         #expect(value.transactions == [snapshot])
         #expect(await publicationSizes.snapshot() == [1])
+        #expect(await successfulTokens.snapshot() == [1, 2])
         await coordinator.sealAndDrain()
     }
 
