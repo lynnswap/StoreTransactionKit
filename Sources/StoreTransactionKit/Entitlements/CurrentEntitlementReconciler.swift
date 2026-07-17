@@ -2,9 +2,17 @@ import Foundation
 import StoreKit
 
 package final class CurrentEntitlementReconciler: Sendable {
-    private struct AcceptedTransaction: Sendable {
+    struct AcceptedTransaction: Sendable {
         let snapshot: StoreTransactionSnapshot
         let acceptance: ProcessingAcceptance<StoreTransactionSnapshot>
+
+        init(
+            snapshot: StoreTransactionSnapshot,
+            acceptance: ProcessingAcceptance<StoreTransactionSnapshot>
+        ) {
+            self.snapshot = snapshot
+            self.acceptance = acceptance
+        }
     }
 
     private let currentEntitlements: @Sendable () async throws -> CurrentEntitlementQueryResult
@@ -83,23 +91,25 @@ package final class CurrentEntitlementReconciler: Sendable {
         }
     }
 
-    private func drain(_ transactions: [AcceptedTransaction]) async throws {
+    func drain(_ transactions: [AcceptedTransaction]) async throws {
         var firstError: (any Error)?
         for transaction in transactions {
             do {
                 _ = try await transaction.acceptance.receipt.terminalValue()
             } catch {
                 if transaction.acceptance.role == .owner {
-                    await failures.enqueue(
-                        StoreTransactionBackgroundFailure(
-                            source: .unfinished,
-                            transactionID: transaction.snapshot.id,
-                            productID: transaction.snapshot.productID,
-                            underlyingError: error
-                        ))
+                    let failure = StoreTransactionBackgroundFailure(
+                        source: .unfinished,
+                        transactionID: transaction.snapshot.id,
+                        productID: transaction.snapshot.productID,
+                        underlyingError: error
+                    )
+                    await failures.enqueue(failure)
                 }
                 if firstError == nil {
-                    firstError = error
+                    firstError = StoreTransactionFailureWithReportingOwner(
+                        underlyingError: error
+                    )
                 }
             }
         }

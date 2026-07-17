@@ -11,6 +11,16 @@ package struct RestoreReservation: Sendable {
 package struct RestoreCoordinatorFailure: Error {
     package let underlyingError: any Error
     package let reportsWhenAbandoned: Bool
+
+    package init(
+        propagating error: any Error,
+        reportsWhenAbandoned: Bool
+    ) {
+        let propagation = StoreTransactionFailurePropagation(error)
+        self.underlyingError = propagation.underlyingError
+        self.reportsWhenAbandoned =
+            reportsWhenAbandoned && !propagation.hasReportingOwner
+    }
 }
 
 package actor RestoreCoordinator {
@@ -56,7 +66,7 @@ package actor RestoreCoordinator {
                     id: id,
                     result: .failure(
                         RestoreCoordinatorFailure(
-                            underlyingError: error,
+                            propagating: error,
                             reportsWhenAbandoned: true
                         ))
                 )
@@ -69,7 +79,7 @@ package actor RestoreCoordinator {
             } catch {
                 result = .failure(
                     RestoreCoordinatorFailure(
-                        underlyingError: error,
+                        propagating: error,
                         reportsWhenAbandoned: refresh.role == .owner
                     ))
             }

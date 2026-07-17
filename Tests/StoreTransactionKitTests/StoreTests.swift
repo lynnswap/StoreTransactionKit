@@ -114,6 +114,43 @@ struct StoreTests {
         try await store.close()
     }
 
+    @Test("startup exposes the underlying unfinished handler failure")
+    func startupUnwrapsReportedHandlerFailure() async throws {
+        let snapshot = makeSnapshot(
+            id: 8,
+            productID: "consumable.startup",
+            productType: .consumable
+        )
+        let fixture = TestSourceFixture(
+            queryUnfinished: {
+                [.verified(makeEnvelope(snapshot: snapshot))]
+            }
+        )
+        fixture.unfinished.finish()
+        let reports = StringRecorder()
+        let store = TransactionStore<SubscriptionID>(
+            source: fixture.source,
+            handleTransaction: { _ in throw TestFailure() },
+            reportFailure: { failure in
+                if failure.source == .unfinished,
+                    failure.transactionID == snapshot.id,
+                    failure.underlyingError is TestFailure
+                {
+                    await reports.append("unfinished-8")
+                } else {
+                    await reports.append("unexpected")
+                }
+            }
+        )
+
+        await store.waitForStartup()
+
+        #expect(store.startupError is TestFailure)
+        #expect(store.entitlements == nil)
+        #expect(await reports.snapshot() == ["unfinished-8"])
+        try await store.close()
+    }
+
     @Test("a stale startup failure cannot replace newer entitlement readiness")
     func newerReadinessWinsStartupFailureRace() async throws {
         let snapshot = makeSnapshot(

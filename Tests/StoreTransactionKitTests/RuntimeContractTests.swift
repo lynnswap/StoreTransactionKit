@@ -283,6 +283,337 @@ struct RuntimeContractTests {
         #expect(await reports.snapshot() == ["abandoned-refresh"])
     }
 
+    @Test("an attached refresh receives the reported underlying failure and can retry")
+    func attachedRefreshUnwrapsReportedFailure() async throws {
+        let unfinished = UnfinishedValueSource()
+        let fixture = TestSourceFixture(
+            queryUnfinished: { await unfinished.read() }
+        )
+        fixture.unfinished.finish()
+        let handlerCalls = TestSignal()
+        let finishes = TestSignal()
+        let reports = StringRecorder()
+        let snapshot = makeSnapshot(
+            id: 26,
+            productID: "consumable.refresh",
+            productType: .consumable
+        )
+        let session = StoreTransactionSession(
+            source: fixture.source,
+            handleTransaction: { _ in
+                await handlerCalls.send()
+                if await handlerCalls.value() == 1 {
+                    throw TestFailure()
+                }
+            },
+            reportFailure: { failure in
+                if failure.source == .unfinished,
+                    failure.transactionID == snapshot.id,
+                    failure.underlyingError is TestFailure
+                {
+                    await reports.append("unfinished-26")
+                } else {
+                    await reports.append("unexpected")
+                }
+            }
+        )
+        _ = try await session.start()
+        await unfinished.replace(
+            with: [
+                .verified(
+                    makeEnvelope(snapshot: snapshot) {
+                        await finishes.send()
+                        await unfinished.replace(with: [])
+                    })
+            ]
+        )
+
+        await #expect(throws: TestFailure.self) {
+            _ = try await session.currentEntitlements()
+        }
+        #expect(await handlerCalls.value() == 1)
+        #expect(await finishes.value() == 0)
+        #expect(await reports.snapshot() == ["unfinished-26"])
+
+        let entitlements = try await session.currentEntitlements()
+
+        #expect(entitlements.transactions.isEmpty)
+        #expect(await handlerCalls.value() == 2)
+        #expect(await finishes.value() == 1)
+        #expect(await reports.snapshot() == ["unfinished-26"])
+        try await session.close()
+    }
+
+    @Test("a direct process unwraps a reported refresh failure and can retry")
+    func directProcessUnwrapsReportedRefreshFailure() async throws {
+        let unfinished = UnfinishedValueSource()
+        let fixture = TestSourceFixture(
+            queryUnfinished: { await unfinished.read() }
+        )
+        fixture.unfinished.finish()
+        let handled = UInt64Recorder()
+        let consumableAttempts = TestSignal()
+        let directFinishes = TestSignal()
+        let consumableFinishes = TestSignal()
+        let reports = StringRecorder()
+        let direct = makeSnapshot(
+            id: 27,
+            productID: "lifetime.direct",
+            productType: .nonConsumable
+        )
+        let consumable = makeSnapshot(
+            id: 28,
+            productID: "consumable.process",
+            productType: .consumable
+        )
+        let runtime = StoreTransactionRuntime(
+            sessionID: UUID(),
+            source: fixture.source,
+            handleTransaction: { snapshot in
+                await handled.append(snapshot.id)
+                if snapshot.id == consumable.id {
+                    await consumableAttempts.send()
+                    if await consumableAttempts.value() == 1 {
+                        throw TestFailure()
+                    }
+                }
+            },
+            entitlementsDidChange: { _ in },
+            reportFailure: { failure in
+                if failure.source == .unfinished,
+                    failure.transactionID == consumable.id,
+                    failure.underlyingError is TestFailure
+                {
+                    await reports.append("unfinished-28")
+                } else {
+                    await reports.append("unexpected")
+                }
+            }
+        )
+        _ = try await runtime.readiness()
+        await unfinished.replace(
+            with: [
+                .verified(
+                    makeEnvelope(snapshot: consumable) {
+                        await consumableFinishes.send()
+                        await unfinished.replace(with: [])
+                    })
+            ]
+        )
+        let directDelivery = StoreTransactionDelivery.verified(
+            makeEnvelope(snapshot: direct) {
+                await directFinishes.send()
+            }
+        )
+
+        let firstLeases = try #require(runtime.beginOperation())
+        await #expect(throws: TestFailure.self) {
+            _ = try await runtime.process(
+                directDelivery,
+                leases: firstLeases
+            )
+        }
+        #expect(await handled.snapshot() == [direct.id, consumable.id])
+        #expect(await directFinishes.value() == 1)
+        #expect(await consumableFinishes.value() == 0)
+        #expect(await reports.snapshot() == ["unfinished-28"])
+
+        let secondLeases = try #require(runtime.beginOperation())
+        let outcome = try await runtime.process(
+            directDelivery,
+            leases: secondLeases
+        )
+
+        #expect(outcome == .completed(direct))
+        #expect(
+            await handled.snapshot() == [
+                direct.id, consumable.id, consumable.id,
+            ]
+        )
+        #expect(await directFinishes.value() == 1)
+        #expect(await consumableFinishes.value() == 1)
+        #expect(await reports.snapshot() == ["unfinished-28"])
+        await runtime.close()
+    }
+
+    @Test("restore unwraps a reported refresh failure and can retry")
+    func restoreUnwrapsReportedRefreshFailure() async throws {
+        let unfinished = UnfinishedValueSource()
+        let synchronizations = TestSignal()
+        let fixture = TestSourceFixture(
+            queryUnfinished: { await unfinished.read() },
+            synchronize: { await synchronizations.send() }
+        )
+        fixture.unfinished.finish()
+        let handlerCalls = TestSignal()
+        let finishes = TestSignal()
+        let reports = StringRecorder()
+        let snapshot = makeSnapshot(
+            id: 29,
+            productID: "consumable.restore",
+            productType: .consumable
+        )
+        let session = StoreTransactionSession(
+            source: fixture.source,
+            handleTransaction: { _ in
+                await handlerCalls.send()
+                if await handlerCalls.value() == 1 {
+                    throw TestFailure()
+                }
+            },
+            reportFailure: { failure in
+                if failure.source == .unfinished,
+                    failure.transactionID == snapshot.id,
+                    failure.underlyingError is TestFailure
+                {
+                    await reports.append("unfinished-29")
+                } else {
+                    await reports.append("unexpected")
+                }
+            }
+        )
+        _ = try await session.start()
+        await unfinished.replace(
+            with: [
+                .verified(
+                    makeEnvelope(snapshot: snapshot) {
+                        await finishes.send()
+                        await unfinished.replace(with: [])
+                    })
+            ]
+        )
+
+        await #expect(throws: TestFailure.self) {
+            _ = try await session.restorePurchases()
+        }
+        #expect(await synchronizations.value() == 1)
+        #expect(await reports.snapshot() == ["unfinished-29"])
+
+        let entitlements = try await session.restorePurchases()
+
+        #expect(entitlements.transactions.isEmpty)
+        #expect(await synchronizations.value() == 2)
+        #expect(await handlerCalls.value() == 2)
+        #expect(await finishes.value() == 1)
+        #expect(await reports.snapshot() == ["unfinished-29"])
+        try await session.close()
+    }
+
+    @Test("an abandoned refresh does not report an owned reconciliation failure twice")
+    func abandonedRefreshDoesNotDuplicateReportedFailure() async throws {
+        let unfinished = UnfinishedValueSource()
+        let fixture = TestSourceFixture(
+            queryUnfinished: { await unfinished.read() }
+        )
+        fixture.unfinished.finish()
+        let handlerStarted = TestSignal()
+        let handlerGate = TestGate()
+        let reported = TestSignal()
+        let reports = StringRecorder()
+        let snapshot = makeSnapshot(
+            id: 30,
+            productID: "consumable.abandoned",
+            productType: .consumable
+        )
+        let session = StoreTransactionSession(
+            source: fixture.source,
+            handleTransaction: { _ in
+                await handlerStarted.send()
+                try await handlerGate.wait()
+                throw TestFailure()
+            },
+            reportFailure: { failure in
+                if failure.source == .unfinished,
+                    failure.transactionID == snapshot.id,
+                    failure.underlyingError is TestFailure
+                {
+                    await reports.append("unfinished-30")
+                } else {
+                    await reports.append("unexpected")
+                }
+                await reported.send()
+            }
+        )
+        _ = try await session.start()
+        await unfinished.replace(
+            with: [.verified(makeEnvelope(snapshot: snapshot))]
+        )
+
+        let refresh = Task {
+            try await session.currentEntitlements()
+        }
+        try await handlerStarted.wait(for: 1)
+        refresh.cancel()
+        await #expect(throws: CancellationError.self) {
+            _ = try await refresh.value
+        }
+
+        await handlerGate.open()
+        try await reported.wait(for: 1)
+        try await session.close()
+
+        #expect(await reports.snapshot() == ["unfinished-30"])
+    }
+
+    @Test("an abandoned restore does not report an owned reconciliation failure twice")
+    func abandonedRestoreDoesNotDuplicateReportedFailure() async throws {
+        let unfinished = UnfinishedValueSource()
+        let synchronizations = TestSignal()
+        let fixture = TestSourceFixture(
+            queryUnfinished: { await unfinished.read() },
+            synchronize: { await synchronizations.send() }
+        )
+        fixture.unfinished.finish()
+        let handlerStarted = TestSignal()
+        let handlerGate = TestGate()
+        let reported = TestSignal()
+        let reports = StringRecorder()
+        let snapshot = makeSnapshot(
+            id: 32,
+            productID: "consumable.abandoned-restore",
+            productType: .consumable
+        )
+        let session = StoreTransactionSession(
+            source: fixture.source,
+            handleTransaction: { _ in
+                await handlerStarted.send()
+                try await handlerGate.wait()
+                throw TestFailure()
+            },
+            reportFailure: { failure in
+                if failure.source == .unfinished,
+                    failure.transactionID == snapshot.id,
+                    failure.underlyingError is TestFailure
+                {
+                    await reports.append("unfinished-32")
+                } else {
+                    await reports.append("unexpected")
+                }
+                await reported.send()
+            }
+        )
+        _ = try await session.start()
+        await unfinished.replace(
+            with: [.verified(makeEnvelope(snapshot: snapshot))]
+        )
+
+        let restore = Task {
+            try await session.restorePurchases()
+        }
+        try await handlerStarted.wait(for: 1)
+        restore.cancel()
+        await #expect(throws: CancellationError.self) {
+            _ = try await restore.value
+        }
+
+        await handlerGate.open()
+        try await reported.wait(for: 1)
+        try await session.close()
+
+        #expect(await synchronizations.value() == 1)
+        #expect(await reports.snapshot() == ["unfinished-32"])
+    }
+
     @Test("history is newest first and retains revoked transactions")
     func historyOrderAndMembership() async throws {
         let sharedDate = Date(timeIntervalSince1970: 100)
@@ -357,6 +688,89 @@ struct RuntimeContractTests {
 
         try await session.close()
         #expect(await reports.snapshot() == ["entitlementRefresh-19-product"])
+    }
+
+    @Test("an update owner prevents an observer refresh from reporting the same failure")
+    func observerRefreshUsesTransactionReportingOwner() async throws {
+        let handlerStarted = TestSignal()
+        let handlerGate = TestGate()
+        let reports = StringRecorder()
+        let snapshot = makeSnapshot(
+            id: 31,
+            productID: "consumable.observer",
+            productType: .consumable
+        )
+        let envelope = makeEnvelope(snapshot: snapshot)
+        let core = TransactionProcessingCore<StoreTransactionSnapshot> { _ in
+            await handlerStarted.send()
+            try await handlerGate.wait()
+            throw TestFailure()
+        }
+        let failures = FailureReporterDispatcher { failure in
+            switch failure.source {
+            case .updates where failure.underlyingError is TestFailure:
+                await reports.append("updates")
+            case .unfinished, .entitlementRefresh,
+                .abandonedDirectOperation:
+                await reports.append("duplicate")
+            default:
+                await reports.append("unexpected")
+            }
+        }
+        let reconciler = CurrentEntitlementReconciler(
+            query: {
+                CurrentEntitlementQueryResult(
+                    snapshots: [],
+                    verificationFailures: []
+                )
+            },
+            queryUnfinished: { [] },
+            core: core,
+            failures: failures
+        )
+
+        let owner = await core.accept(envelope)
+        try await handlerStarted.wait(for: 1)
+        let observer = await core.accept(envelope)
+        #expect(owner.role == .owner)
+        #expect(observer.role == .inFlightObserver)
+
+        let entitlements = EntitlementRefreshCoordinator(
+            query: {
+                try await reconciler.drain([
+                    CurrentEntitlementReconciler.AcceptedTransaction(
+                        snapshot: snapshot,
+                        acceptance: observer
+                    )
+                ])
+                return []
+            },
+            didChange: { _ in }
+        )
+        let pipeline = StoreTransactionPipeline(
+            core: core,
+            entitlements: entitlements,
+            failures: failures
+        )
+        let update = Task {
+            await pipeline.processAcceptedBackground(
+                snapshot: snapshot,
+                acceptance: owner,
+                source: .updates
+            )
+        }
+        let subscriptionRefresh = Task {
+            await pipeline.refreshEntitlements()
+        }
+
+        await handlerGate.open()
+        await update.value
+        await subscriptionRefresh.value
+
+        #expect(await reports.snapshot() == ["updates"])
+        await core.finishInputAndDrain()
+        await entitlements.sealAndDrain()
+        await failures.sealAndDrain()
     }
 
     @Test("reconciliation requeries after handling a newly unfinished revision")

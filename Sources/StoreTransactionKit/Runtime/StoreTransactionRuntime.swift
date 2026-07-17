@@ -3,6 +3,16 @@ import StoreKit
 private struct DirectOperationFailure: Error {
     let underlyingError: any Error
     let reportsWhenAbandoned: Bool
+
+    init(
+        propagating error: any Error,
+        reportsWhenAbandoned: Bool
+    ) {
+        let propagation = StoreTransactionFailurePropagation(error)
+        self.underlyingError = propagation.underlyingError
+        self.reportsWhenAbandoned =
+            reportsWhenAbandoned && !propagation.hasReportingOwner
+    }
 }
 
 package final class StoreTransactionRuntime: Sendable {
@@ -115,6 +125,8 @@ package final class StoreTransactionRuntime: Sendable {
             )
         } catch is ProcessingReceiptWaiterCancellation {
             throw CancellationError()
+        } catch let owned as StoreTransactionFailureWithReportingOwner {
+            throw owned.underlyingError
         }
     }
 
@@ -184,7 +196,7 @@ package final class StoreTransactionRuntime: Sendable {
             } catch {
                 operationReceipt.fail(
                     DirectOperationFailure(
-                        underlyingError: error,
+                        propagating: error,
                         reportsWhenAbandoned:
                             accepted.acceptance.role == .owner
                     )
@@ -199,7 +211,7 @@ package final class StoreTransactionRuntime: Sendable {
             } catch {
                 operationReceipt.fail(
                     DirectOperationFailure(
-                        underlyingError: error,
+                        propagating: error,
                         reportsWhenAbandoned: refresh.role == .owner
                     )
                 )
@@ -229,7 +241,7 @@ package final class StoreTransactionRuntime: Sendable {
             } catch {
                 operationReceipt.fail(
                     DirectOperationFailure(
-                        underlyingError: error,
+                        propagating: error,
                         reportsWhenAbandoned: refresh.role == .owner
                     )
                 )
@@ -283,7 +295,7 @@ package final class StoreTransactionRuntime: Sendable {
             } catch let failure as RestoreCoordinatorFailure {
                 operationReceipt.fail(
                     DirectOperationFailure(
-                        underlyingError: failure.underlyingError,
+                        propagating: failure.underlyingError,
                         reportsWhenAbandoned:
                             restore.role == .owner
                             && failure.reportsWhenAbandoned

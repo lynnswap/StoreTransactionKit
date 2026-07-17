@@ -234,6 +234,87 @@ struct StoreTransactionSessionTests {
         try await session.close()
     }
 
+    @Test("an unfinished consumable failure blocks publication and reports once")
+    func unfinishedConsumableFailureBlocksPublication() async throws {
+        let active = makeSnapshot(
+            id: 3,
+            productID: "subscription.plus",
+            productType: .autoRenewable
+        )
+        let consumable = makeSnapshot(
+            id: 4,
+            productID: "consumable.tokens",
+            productType: .consumable
+        )
+        let values = EntitlementValueSource([active])
+        let unfinished = UnfinishedValueSource()
+        let fixture = TestSourceFixture(
+            currentEntitlements: { await values.read() },
+            queryUnfinished: { await unfinished.read() }
+        )
+        fixture.unfinished.finish()
+        let handlerCalls = TestSignal()
+        let finishes = TestSignal()
+        let publications = UInt64Recorder()
+        let published = TestSignal()
+        let reports = StringRecorder()
+        let reported = TestSignal()
+        let session = StoreTransactionSession(
+            source: fixture.source,
+            handleTransaction: { snapshot in
+                #expect(snapshot.id == consumable.id)
+                await handlerCalls.send()
+                if await handlerCalls.value() == 1 {
+                    throw TestFailure()
+                }
+            },
+            entitlementsDidChange: { value in
+                await publications.append(UInt64(value.transactions.count))
+                await published.send()
+            },
+            reportFailure: { failure in
+                if failure.source == .unfinished,
+                    failure.transactionID == consumable.id,
+                    failure.productID == consumable.productID,
+                    failure.underlyingError is TestFailure
+                {
+                    await reports.append("unfinished-4")
+                } else {
+                    await reports.append("unexpected")
+                }
+                await reported.send()
+            }
+        )
+
+        _ = try await session.start()
+        await values.replace(with: [])
+        await unfinished.replace(
+            with: [
+                .verified(
+                    makeEnvelope(snapshot: consumable) {
+                        await finishes.send()
+                        await unfinished.replace(with: [])
+                    })
+            ]
+        )
+
+        fixture.subscriptionStatusUpdates.yield()
+        try await reported.wait(for: 1)
+
+        #expect(await handlerCalls.value() == 1)
+        #expect(await finishes.value() == 0)
+        #expect(await publications.snapshot() == [1])
+
+        fixture.subscriptionStatusUpdates.yield()
+        try await published.wait(for: 2)
+
+        #expect(await handlerCalls.value() == 2)
+        #expect(await finishes.value() == 1)
+        #expect(await publications.snapshot() == [1, 0])
+        #expect(await reports.snapshot() == ["unfinished-4"])
+        try await session.close()
+    }
+
     @Test("revocation handling finishes before entitlement removal is published")
     func revocationPrecedesRemovalPublication() async throws {
         let active = makeSnapshot(

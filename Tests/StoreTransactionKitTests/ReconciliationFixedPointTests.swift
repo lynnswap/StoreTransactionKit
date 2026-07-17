@@ -215,8 +215,13 @@ struct ReconciliationFixedPointTests {
             failures: failures
         )
 
-        await #expect(throws: TestFailure.self) {
+        do {
             _ = try await reconciler.query()
+            Issue.record("A failed unfinished transaction unexpectedly reconciled.")
+        } catch let owned as StoreTransactionFailureWithReportingOwner {
+            #expect(owned.underlyingError is TestFailure)
+        } catch {
+            Issue.record("Unexpected reconciliation error: \(error)")
         }
         #expect(await handlerCalls.value() == 1)
         #expect(await finishes.value() == 0)

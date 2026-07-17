@@ -81,13 +81,15 @@ package final class StoreTransactionPipeline: Sendable {
         do {
             _ = try await refresh.receipt.terminalValue()
         } catch {
+            let propagation = StoreTransactionFailurePropagation(error)
+            guard !propagation.hasReportingOwner else { return }
             guard refresh.role == .owner else { return }
             await failures.enqueue(
                 StoreTransactionBackgroundFailure(
                     source: .entitlementRefresh,
                     transactionID: snapshot?.id,
                     productID: snapshot?.productID,
-                    underlyingError: error
+                    underlyingError: propagation.underlyingError
                 ))
         }
     }
@@ -97,15 +99,16 @@ package final class StoreTransactionPipeline: Sendable {
         do {
             _ = try await refresh.receipt.terminalValue()
         } catch {
+            let propagation = StoreTransactionFailurePropagation(error)
+            guard !propagation.hasReportingOwner else { return }
             guard refresh.role == .owner else { return }
             await failures.enqueue(
                 StoreTransactionBackgroundFailure(
                     source: .entitlementRefresh,
                     transactionID: nil,
                     productID: nil,
-                    underlyingError: error
+                    underlyingError: propagation.underlyingError
                 ))
         }
     }
-
 }

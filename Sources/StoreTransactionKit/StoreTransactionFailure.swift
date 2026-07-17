@@ -69,6 +69,31 @@ public struct StoreTransactionBackgroundFailure: Error, Sendable {
     }
 }
 
+package struct StoreTransactionFailureWithReportingOwner: Error, Sendable {
+    package let underlyingError: any Error
+
+    package init(underlyingError: any Error) {
+        self.underlyingError = underlyingError
+    }
+}
+
+package struct StoreTransactionFailurePropagation: Sendable {
+    package let underlyingError: any Error
+    package let hasReportingOwner: Bool
+
+    package init(_ error: any Error) {
+        if let owned =
+            error as? StoreTransactionFailureWithReportingOwner
+        {
+            self.underlyingError = owned.underlyingError
+            self.hasReportingOwner = true
+        } else {
+            self.underlyingError = error
+            self.hasReportingOwner = false
+        }
+    }
+}
+
 /// An error caused by using a store outside its documented lifecycle.
 public enum StoreTransactionError: Error, Sendable, Hashable {
     /// The store has begun its shared close operation and accepts no new work.
