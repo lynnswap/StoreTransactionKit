@@ -69,16 +69,34 @@ package final class CurrentEntitlementReconciler: Sendable {
             }
 
             guard !acceptedTransactions.isEmpty else {
-                await reportUnfinishedVerificationFailures(
-                    unfinishedVerificationFailures
+                await reportVerificationFailures(
+                    unfinished: unfinishedVerificationFailures,
+                    currentEntitlements: result.verificationFailures
                 )
-                await reportVerificationFailures(result.verificationFailures)
                 return result.snapshots
             }
 
-            try await drain(acceptedTransactions)
+            do {
+                try await drain(acceptedTransactions)
+            } catch {
+                await reportVerificationFailures(
+                    unfinished: unfinishedVerificationFailures,
+                    currentEntitlements: result.verificationFailures
+                )
+                throw error
+            }
             reconciledRevisions.formUnion(iterationRevisions)
         }
+    }
+
+    private func reportVerificationFailures(
+        unfinished: [any Error],
+        currentEntitlements: [StoreTransactionVerificationError]
+    ) async {
+        await reportUnfinishedVerificationFailures(unfinished)
+        await reportCurrentEntitlementVerificationFailures(
+            currentEntitlements
+        )
     }
 
     private func reportUnfinishedVerificationFailures(
@@ -123,7 +141,7 @@ package final class CurrentEntitlementReconciler: Sendable {
         }
     }
 
-    private func reportVerificationFailures(
+    private func reportCurrentEntitlementVerificationFailures(
         _ verificationFailures: [StoreTransactionVerificationError]
     ) async {
         for failure in verificationFailures {

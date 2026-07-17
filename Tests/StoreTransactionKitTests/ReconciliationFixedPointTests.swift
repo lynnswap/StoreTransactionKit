@@ -316,6 +316,94 @@ struct ReconciliationFixedPointTests {
         await core.finishInputAndDrain()
         await failures.sealAndDrain()
     }
+
+    @Test("a terminal handler failure preserves verification diagnostics")
+    func handlerFailurePreservesVerificationDiagnostics() async throws {
+        let snapshot = makeSnapshot(
+            id: 46,
+            productID: "consumable.diagnostics",
+            productType: .consumable
+        )
+        let finishes = TestSignal()
+        let reports = StringRecorder()
+        let currentFailure = StoreTransactionVerificationError(
+            underlyingError: TerminalCurrentVerificationFailure()
+        )
+        let core = TransactionProcessingCore<StoreTransactionSnapshot> { _ in
+            throw TestFailure()
+        }
+        let failures = FailureReporterDispatcher { failure in
+            switch failure.source {
+            case .unfinished:
+                if failure.transactionID == snapshot.id,
+                    failure.underlyingError is TestFailure
+                {
+                    await reports.append("handler")
+                } else if failure.transactionID == nil,
+                    failure.underlyingError
+                        is TerminalUnfinishedVerificationFailure
+                {
+                    await reports.append("unfinished-verification")
+                } else {
+                    await reports.append("unexpected")
+                }
+            case .currentEntitlementVerification:
+                guard
+                    let verificationFailure =
+                        failure.underlyingError
+                        as? StoreTransactionVerificationError,
+                    verificationFailure.underlyingError
+                        is TerminalCurrentVerificationFailure
+                else {
+                    await reports.append("unexpected")
+                    return
+                }
+                await reports.append("current-verification")
+            default:
+                await reports.append("unexpected")
+            }
+        }
+        let reconciler = CurrentEntitlementReconciler(
+            query: {
+                CurrentEntitlementQueryResult(
+                    snapshots: [],
+                    verificationFailures: [currentFailure]
+                )
+            },
+            queryUnfinished: {
+                [
+                    .unverified(TerminalUnfinishedVerificationFailure()),
+                    .verified(
+                        makeEnvelope(snapshot: snapshot) {
+                            await finishes.send()
+                        }),
+                ]
+            },
+            core: core,
+            failures: failures
+        )
+
+        do {
+            _ = try await reconciler.query(
+                retryFailedTransactions: false
+            )
+            Issue.record("A failed handler unexpectedly reconciled.")
+        } catch let owned as StoreTransactionFailureWithReportingOwner {
+            #expect(owned.underlyingError is TestFailure)
+        } catch {
+            Issue.record("Unexpected reconciliation error: \(error)")
+        }
+
+        #expect(await finishes.value() == 0)
+        #expect(
+            await reports.snapshot() == [
+                "handler",
+                "unfinished-verification",
+                "current-verification",
+            ])
+        await core.finishInputAndDrain()
+        await failures.sealAndDrain()
+    }
 }
 
 private struct DiscardedVerificationFailure: Error, Sendable {}
@@ -323,3 +411,7 @@ private struct DiscardedVerificationFailure: Error, Sendable {}
 private struct StableVerificationFailure: Error, Sendable {}
 
 private struct PersistentUnfinishedVerificationFailure: Error, Sendable {}
+
+private struct TerminalUnfinishedVerificationFailure: Error, Sendable {}
+
+private struct TerminalCurrentVerificationFailure: Error, Sendable {}
