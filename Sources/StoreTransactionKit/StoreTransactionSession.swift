@@ -211,7 +211,7 @@ package actor StoreTransactionSession {
     /// - Returns: The entitlement publication from a query reserved after sync succeeds.
     /// - Throws: A synchronization, verification, query, lifecycle, callback
     ///   reentrancy, or caller cancellation error. StoreKit may throw
-    ///   ``StoreKit/StoreKitError/userCancelled`` when the user dismisses
+    ///   `StoreKitError.userCancelled` when the user dismisses
     ///   authentication; callers should treat that as a normal user outcome.
     package func restorePurchases() async throws -> StoreEntitlements {
         let runtime = try runningRuntime(operation: .restorePurchases)

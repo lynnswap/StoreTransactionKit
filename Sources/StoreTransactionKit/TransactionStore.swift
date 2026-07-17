@@ -179,7 +179,7 @@ where
     ///
     /// This method can present authentication UI. It refreshes observable
     /// entitlement state before returning. StoreKit may throw
-    /// ``StoreKit/StoreKitError/userCancelled`` when the user dismisses
+    /// `StoreKitError.userCancelled` when the user dismisses
     /// authentication; treat that as a normal user outcome rather than a
     /// diagnostic failure.
     @discardableResult

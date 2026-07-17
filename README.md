@@ -3,7 +3,12 @@
 StoreTransactionKit moves StoreKit 2 transaction monitoring, verification,
 durable processing, and `Transaction.finish()` into one process-owned,
 observable store.
-It supports iOS 18.4 and later and macOS 15.4 and later.
+
+## Requirements
+
+- iOS 18.4+
+- macOS 15.4+
+- Swift 6.3+
 
 ## What it owns — and what your app owns
 
