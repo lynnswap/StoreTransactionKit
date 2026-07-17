@@ -166,7 +166,7 @@ struct ContentView: View {
     @State private var isShowingPaywall = false
 
     private var canExportPDF: Bool {
-        store.activeEntitlements?.contains(.tier1) == true
+        store.isEntitled(to: .tier1)
     }
 
     var body: some View {
@@ -245,8 +245,8 @@ Both callback contracts are documented on `TransactionStore.init`.
 - `activeEntitlements` is `nil` while `entitlementStatus` is `.loading` or
   `.failed`. When the status is `.ready`, an empty set means no catalog
   entitlement is active.
-- Gate paid features on `activeEntitlements` without blocking the surrounding
-  UI. Consult `entitlementStatus` only when the app needs to explain why the
+- Gate paid features with `isEntitled(to:)` without blocking the surrounding UI.
+  Consult `entitlementStatus` only when the app needs to explain why the
   entitlement set is unavailable.
 - A successful refresh after `.failed` publishes `.ready` and the new active
   entitlement set. A background refresh failure after `.ready` preserves the
@@ -289,6 +289,12 @@ and
 Apple's
 [purchase API guidance](https://developer.apple.com/documentation/storekit/product/purchase(options:))
 explains which purchase entry point to use for each UI framework and platform.
+
+## API design
+
+See [Subscription catalog API design](Docs/SubscriptionCatalogAPI.md) for the
+proposed public interface, validation rules, ownership boundaries, and state
+transition contract behind the Quick start.
 
 ## Testing
 
