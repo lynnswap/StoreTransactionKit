@@ -38,16 +38,48 @@ Your app owns everything the user sees and everything it persists:
 
 ## Quick start
 
-Define the entitlement identifiers in the app. A string-backed enum keeps
-StoreKit product identifiers typed without requiring a framework protocol.
+Define the Product IDs and app entitlements that gate your features. Keep the
+subscription group alongside each subscription so the catalog can validate
+StoreKit's group membership:
 
 ```swift
 import StoreTransactionKit
 
-enum SubscriptionID: String, Hashable, Sendable {
-    case monthly = "com.example.subscription.monthly"
-    case yearly = "com.example.subscription.yearly"
+enum SubscriptionGroupID: String, Hashable, Sendable {
+    case plans = "YOUR_SUBSCRIPTION_GROUP_ID"
 }
+
+enum SubscriptionProductID: String, CaseIterable, Hashable, Sendable {
+    case tier1Monthly = "com.example.subscription.tier1.monthly"
+    case tier1Yearly = "com.example.subscription.tier1.yearly"
+    case tier2Monthly = "com.example.subscription.tier2.monthly"
+    case tier2Yearly = "com.example.subscription.tier2.yearly"
+
+    var entitlement: SubscriptionEntitlement {
+        switch self {
+        case .tier1Monthly, .tier1Yearly:
+            .tier1
+
+        case .tier2Monthly, .tier2Yearly:
+            .tier2
+        }
+    }
+
+    var subscriptionGroupID: SubscriptionGroupID {
+        .plans
+    }
+}
+
+enum SubscriptionEntitlement: Hashable, Sendable {
+    case tier1
+    case tier2
+}
+
+let entitlementCatalog = EntitlementCatalog(
+    products: SubscriptionProductID.self,
+    entitlement: \.entitlement,
+    subscriptionGroupID: \.subscriptionGroupID
+)
 
 actor PurchaseLedger {
     func apply(_ transaction: StoreTransactionSnapshot) async throws {
@@ -78,8 +110,9 @@ actor StoreDiagnostics {
 func makeStore(
     ledger: PurchaseLedger,
     diagnostics: StoreDiagnostics
-) -> TransactionStore<SubscriptionID> {
+) -> TransactionStore<SubscriptionEntitlement> {
     TransactionStore(
+        entitlementCatalog: entitlementCatalog,
         handleTransaction: { transaction in
             try await ledger.apply(transaction)
         },
@@ -96,11 +129,12 @@ process-lifetime composition root, retain one store with SwiftUI state, and
 inject that same instance into the environment:
 
 ```swift
+import StoreTransactionKit
 import SwiftUI
 
 @main
 struct ExampleApp: App {
-    @State private var store: TransactionStore<SubscriptionID>
+    @State private var store: TransactionStore<SubscriptionEntitlement>
 
     init() {
         let ledger = PurchaseLedger()
@@ -115,55 +149,70 @@ struct ExampleApp: App {
 
     var body: some Scene {
         WindowGroup {
-            PremiumStoreView()
-                .environment(store)
+            NavigationStack {
+                ContentView()
+            }
+            .environment(store)
         }
     }
 }
 ```
 
-The view reads the store directly and renders the three entitlement states —
-resolving, failed, and resolved:
+Read the store from the environment and gate premium features without making
+the rest of the UI depend on entitlement availability:
 
 ```swift
 import StoreKit
+import StoreTransactionKit
 import SwiftUI
 
-struct PremiumStoreView: View {
-    @Environment(TransactionStore<SubscriptionID>.self) private var store
-    @State private var refreshError: (any Error)?
+struct ContentView: View {
+    @Environment(TransactionStore<SubscriptionEntitlement>.self) private var store
+    @State private var isShowingPaywall = false
+
+    private var canExportPDF: Bool {
+        store.activeEntitlements?.contains(.tier1) == true
+    }
 
     var body: some View {
-        VStack {
-            if let activeEntitlements = store.activeEntitlements {
-                if activeEntitlements.contains(.monthly)
-                    || activeEntitlements.contains(.yearly)
-                {
-                    Label("Premium active", systemImage: "checkmark.seal.fill")
+        List {
+            Section {
+                NavigationLink("All notes") {
+                    NotesView()
                 }
-            } else if let error = refreshError ?? store.startupError {
-                Text(error.localizedDescription)
-                Button("Retry") {
-                    Task {
-                        do {
-                            try await store.refreshEntitlements()
-                            refreshError = nil
-                        } catch {
-                            refreshError = error
-                        }
-                    }
-                }
-            } else {
-                ProgressView()
             }
 
+            Section {
+                Button("Export as PDF") {
+                    exportPDF()
+                }
+                .disabled(!canExportPDF)
+
+                Button("Plans and subscriptions") {
+                    isShowingPaywall = true
+                }
+            } header: {
+                Text("Premium")
+            }
+        }
+        .sheet(isPresented: $isShowingPaywall) {
             SubscriptionStoreView(
-                groupID: "YOUR_SUBSCRIPTION_GROUP_ID"
+                groupID: SubscriptionGroupID.plans.rawValue
             )
         }
     }
 }
 ```
+
+### Connect the identifiers
+
+Replace the group and product raw values with the identifiers configured in
+[App Store Connect][subscription-setup]. Each Product ID maps to one app
+entitlement. StoreKit remains the source of truth for subscription group levels
+and durations.
+
+For local StoreKit Testing, use the same values in the active `.storekit`
+configuration. See [Setting up StoreKit Testing in Xcode][storekit-testing].
 
 No `onInAppPurchaseCompletion` modifier is needed: successful StoreKit view
 purchases arrive through `Transaction.updates`, which the store already
@@ -194,18 +243,28 @@ promptly instead of performing work that can wait indefinitely.
 
 Both callback contracts are documented on `TransactionStore.init`.
 
-## How entitlement state behaves
+## How entitlement availability behaves
 
-- `activeEntitlements` is `nil` until the first entitlement query resolves; an
-  empty set means the query resolved and no known identifier matched.
+- `entitlementStatus` is `.loading` before the first readiness result,
+  `.failed(error)` after a readiness failure, and `.ready` after success.
+- `activeEntitlements` is `nil` while `entitlementStatus` is `.loading` or
+  `.failed`. When the status is `.ready`, an empty set means no catalog
+  entitlement is active.
+- Gate paid features on `activeEntitlements` without blocking the surrounding
+  UI. Consult `entitlementStatus` only when the app needs to explain why the
+  entitlement set is unavailable.
+- A successful refresh after `.failed` publishes `.ready` and the new active
+  entitlement set. A background refresh failure after `.ready` preserves the
+  last active set and reports the failure through `reportFailure`.
 - Startup and every refresh reconcile `Transaction.unfinished` — including
   consumables — before publishing state. A handler failure fails that refresh;
   the next refresh retries the unfinished work.
 - Transactions superseded by a subscription upgrade stay in `entitlements` but
-  leave `activeEntitlements`.
+  don't appear in `activeEntitlements`.
 - Unverified current-entitlement elements are omitted and reported to
   `reportFailure` with source `.currentEntitlementVerification`.
-- Identifiers map 1:1 to product IDs. Gate access on the tier set, or use
+- Product IDs mapped to the same app entitlement appear as the same typed value.
+  Gate access on that set, or use
   `StoreTransactionSnapshot.subscriptionGroupID` to grant at
   subscription-group granularity.
 
@@ -247,3 +306,5 @@ command.
 StoreTransactionKit is available under the MIT License.
 
 [understanding]: https://lynnswap.github.io/StoreTransactionKit/documentation/storetransactionkit/understandingtransactionhandling
+[subscription-setup]: https://developer.apple.com/help/app-store-connect/manage-subscriptions/offer-auto-renewable-subscriptions
+[storekit-testing]: https://developer.apple.com/documentation/xcode/setting-up-storekit-testing-in-xcode
