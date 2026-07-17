@@ -85,9 +85,39 @@ func makeStore(
 ```
 
 `TransactionStore` is `@MainActor` and `@Observable`. It starts monitoring
-during initialization; retain one instance in the application's
-process-lifetime composition. Place it in the SwiftUI environment and render
-the three entitlement states — resolving, failed, and resolved:
+during initialization. Create the app-owned dependencies once at the
+process-lifetime composition root, retain one store with SwiftUI state, and
+inject that same instance into the environment:
+
+```swift
+import SwiftUI
+
+@main
+struct ExampleApp: App {
+    @State private var store: TransactionStore<SubscriptionID>
+
+    init() {
+        let ledger = PurchaseLedger()
+        let diagnostics = StoreDiagnostics()
+        _store = State(
+            initialValue: makeStore(
+                ledger: ledger,
+                diagnostics: diagnostics
+            )
+        )
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            PremiumStoreView()
+                .environment(store)
+        }
+    }
+}
+```
+
+The view reads the store directly and renders the three entitlement states —
+resolving, failed, and resolved:
 
 ```swift
 import StoreKit
@@ -135,9 +165,9 @@ monitors. If you add a non-`nil` completion action, it replaces that default
 *and* StoreKit's failure alert — pass each `.success` value to
 `store.process(_:)` and own `.failure` presentation yourself.
 
-## The handler contract
+## The callback contracts
 
-`handleTransaction` is the one place where correctness depends on your code:
+`handleTransaction` owns the app's durable transaction correctness:
 
 - **Be idempotent.** Delivery is at least once; key the ledger on transaction
   identity plus the business event it applies.
@@ -151,7 +181,12 @@ monitors. If you add a non-`nil` completion action, it replaces that default
   `reportFailure`, even through an awaited detached task — doing so creates a
   dependency cycle with the work being handled.
 
-The complete contract is documented on `TransactionStore.init`.
+`reportFailure` is also a liveness boundary. StoreTransactionKit delivers
+admitted failures serially with backpressure and waits for each callback to
+return; `close()` waits for those callbacks too. Record or enqueue the failure
+promptly instead of performing work that can wait indefinitely.
+
+Both callback contracts are documented on `TransactionStore.init`.
 
 ## How entitlement state behaves
 

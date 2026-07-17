@@ -24,9 +24,9 @@ package enum StoreTransactionCallback: Sendable {
     case failureReporter
 }
 
-/// A failure produced by work that has no attached public caller.
+/// A failure delivered through the process-owned background reporting path.
 public struct StoreTransactionBackgroundFailure: Error, Sendable {
-    /// The background path that produced the failure.
+    /// The background owner that reported the failure.
     public enum Source: Sendable, Hashable {
         /// A delivery from `Transaction.updates`.
         case updates
@@ -44,7 +44,7 @@ public struct StoreTransactionBackgroundFailure: Error, Sendable {
         case abandonedDirectOperation(StoreTransactionOperation)
     }
 
-    /// The background path that produced the failure.
+    /// The background owner that reported the failure.
     public let source: Source
 
     /// The verified transaction identifier, when verification reached a transaction snapshot.

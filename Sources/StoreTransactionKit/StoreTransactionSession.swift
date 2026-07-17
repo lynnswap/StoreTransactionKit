@@ -39,10 +39,15 @@ package actor StoreTransactionSession {
     ///     successfully.
     ///   - entitlementsDidChange: Receives complete, ordered entitlement
     ///     snapshots when the current entitlement content changes.
-    ///   - reportFailure: Receives failures from process-owned work that has no
-    ///     attached public caller. The callback is lossless and backpressured.
+    ///   - reportFailure: Receives failures owned by process background work,
+    ///     including background deliveries, reconciliation verification, and
+    ///     direct operations abandoned by every caller. Admitted failures are
+    ///     delivered serially and losslessly with backpressure. The callback
+    ///     must return promptly; ``close()`` waits for every admitted callback
+    ///     to finish.
     ///
-    /// None of the callbacks may call back into the same session.
+    /// None of the callbacks may call back into the same session, directly or
+    /// through an awaited child or detached task.
     package init(
         sessionID: UUID = UUID(),
         handleTransaction:

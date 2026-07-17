@@ -43,8 +43,9 @@ Snapshots exist only for transactions that StoreKit verified; the handler and
 the projection never observe unverified data. An unverified purchase result
 passed to ``TransactionStore/process(_:)`` throws a
 ``StoreTransactionVerificationError`` to that caller and is not reported to
-the failure callback. Unverified deliveries on paths with no attached caller
-are reported through the failure callback instead:
+the failure callback. Unverified elements accepted by background monitoring,
+reconciliation, or projection-query paths are reported through the failure
+callback instead:
 
 - From `Transaction.updates`, with source
   ``StoreTransactionBackgroundFailure/Source/updates``.
@@ -77,21 +78,39 @@ identifiers map 1:1 to product identifiers, so gate access on the tier set or
 on `StoreTransactionSnapshot.subscriptionGroupID` when any tier of a group
 grants the same access.
 
-## Failure reporting
+## Failure reporting and readiness
 
-Failures travel on exactly one of two channels. Work with an attached caller
-throws to that caller. Work with no attached public caller — background
-deliveries, and operations whose every waiting caller cancelled — is reported
-once through the failure callback as a
-``StoreTransactionBackgroundFailure``, which is delivered losslessly with
-backpressure. A reconciliation failure that was already reported with source
-``StoreTransactionBackgroundFailure/Source/unfinished`` is not reported a
-second time when it also fails the refresh that triggered it.
+Failure delivery and readiness state are related but separate contracts.
+Public operations deliver terminal errors to their attached callers by
+throwing. Background-owned physical work reports a failure once through the
+failure callback as a ``StoreTransactionBackgroundFailure``. This includes
+background deliveries, unfinished and current-entitlement verification, and
+direct operations whose every waiting caller cancelled.
 
-``TransactionStore/startupError`` holds the error from the initial readiness
-attempt. A later successful entitlement refresh — which also retries the
-unfinished work that failed — clears it; call
+Some public operations contain child work whose physical attempt may already
+be owned by another producer. A failed `Transaction.unfinished`
+reconciliation attempt both fails the enclosing startup or refresh and is
+reported once by that attempt's reporting owner. Its source is
+``StoreTransactionBackgroundFailure/Source/unfinished`` when reconciliation
+owns the attempt, or the existing owner's source — such as
+``StoreTransactionBackgroundFailure/Source/updates`` — when reconciliation
+joins in-flight work. The enclosing operation propagates the underlying error
+but doesn't report that physical failure a second time.
+
+The initial readiness attempt has no throwing public caller.
+``TransactionStore/startupError`` reflects its error for observable UI state.
+A failed startup unfinished reconciliation therefore appears both as one
+owner-sourced report and as `startupError`; that report isn't necessarily
+`.unfinished` when the attempt was already in flight. An entitlement query
+failure with no separate reporting owner appears only as `startupError`. A
+later successful entitlement refresh — which also retries failed unfinished
+work — clears the property; call
 ``TransactionStore/refreshEntitlements()`` from a retry affordance in the UI.
+
+The failure callback receives admitted failures serially and losslessly with
+backpressure. Every reporting path waits for the callback to return, and
+``TransactionStore/close()`` drains admitted callbacks. Record or enqueue each
+failure promptly instead of waiting indefinitely.
 
 ## Lifecycle
 

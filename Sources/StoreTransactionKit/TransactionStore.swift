@@ -71,11 +71,16 @@ where
     ///     handler-delivery contract, so the handler must be idempotent.
     ///     StoreTransactionKit calls `finish()` only after the closure returns
     ///     successfully. The handler must not call back into the same store,
-    ///     directly or through an awaited child task, because doing so creates a
-    ///     dependency cycle with the operation being handled.
-    ///   - reportFailure: Receives failures from process-owned transaction work
-    ///     that has no attached public caller. This callback must not call back
-    ///     into the same store, directly or through an awaited child task.
+    ///     directly or through an awaited child or detached task, because doing
+    ///     so creates a dependency cycle with the operation being handled.
+    ///   - reportFailure: Receives failures owned by process background work,
+    ///     including background deliveries, unfinished and current-entitlement
+    ///     verification, and direct operations abandoned by every caller. A
+    ///     background-owned failure can also fail an enclosing startup or
+    ///     refresh. Admitted failures are delivered serially with backpressure,
+    ///     and ``close()`` waits for every callback to return. Record or enqueue
+    ///     each failure promptly. This callback must not call back into the same
+    ///     store, directly or through an awaited child or detached task.
     public convenience init(
         handleTransaction:
             @escaping @Sendable (StoreTransactionSnapshot) async throws -> Void,
