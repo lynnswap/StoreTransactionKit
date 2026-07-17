@@ -84,19 +84,19 @@ struct StoreTransactionSessionTests {
         let finishes = TestSignal()
         let reported = TestSignal()
         let reports = StringRecorder()
+        let unfinished = UnfinishedValueSource()
+        let unfinishedDelivery = StoreTransactionDelivery.verified(
+            makeEnvelope(snapshot: snapshot) {
+                await finishes.send()
+                await unfinished.replace(with: [])
+            }
+        )
         let fixture = TestSourceFixture(
             currentEntitlements: {
                 try await reported.wait(for: 1)
                 return []
             },
-            queryUnfinished: {
-                [
-                    .verified(
-                        makeEnvelope(snapshot: snapshot) {
-                            await finishes.send()
-                        })
-                ]
-            }
+            queryUnfinished: { await unfinished.read() }
         )
         let session = StoreTransactionSession(
             source: fixture.source,
@@ -116,6 +116,7 @@ struct StoreTransactionSessionTests {
                 } else {
                     await reports.append("unexpected")
                 }
+                await unfinished.replace(with: [unfinishedDelivery])
                 await reported.send()
             }
         )
@@ -151,16 +152,16 @@ struct StoreTransactionSessionTests {
         let markerFinish = TestSignal()
         let reported = TestSignal()
         let reports = StringRecorder()
+        let unfinished = UnfinishedValueSource()
+        let failedDelivery = StoreTransactionDelivery.verified(
+            makeEnvelope(snapshot: failedSnapshot) {
+                await failedFinish.send()
+                await unfinished.replace(with: [])
+            }
+        )
         let fixture = TestSourceFixture(
             currentEntitlements: { try await query.next() },
-            queryUnfinished: {
-                [
-                    .verified(
-                        makeEnvelope(snapshot: failedSnapshot) {
-                            await failedFinish.send()
-                        })
-                ]
-            }
+            queryUnfinished: { await unfinished.read() }
         )
         let session = StoreTransactionSession(
             source: fixture.source,
@@ -211,8 +212,7 @@ struct StoreTransactionSessionTests {
         #expect(await failedFinish.value() == 0)
         #expect(await reports.snapshot() == ["updates-43"])
 
-        await query.succeed([])
-        try await query.waitForRequest(2)
+        await unfinished.replace(with: [failedDelivery])
         await query.succeed([])
         try await session.close()
 
@@ -367,12 +367,12 @@ struct StoreTransactionSessionTests {
 
         try await handlerStarted.wait(for: 1)
         #expect(await publications.snapshot() == [0])
-        #expect(await fixture.entitlementQueryCount.value() == 2)
+        #expect(await fixture.entitlementQueryCount.value() == 1)
 
         await handlerGate.open()
         try await published.wait(for: 2)
         #expect(await events.snapshot() == ["handle-2", "finish-2"])
-        #expect(await fixture.entitlementQueryCount.value() == 3)
+        #expect(await fixture.entitlementQueryCount.value() == 2)
         #expect(await publications.snapshot() == [0, 1])
         try await session.close()
     }

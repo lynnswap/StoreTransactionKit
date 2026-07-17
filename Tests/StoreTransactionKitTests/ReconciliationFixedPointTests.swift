@@ -76,18 +76,24 @@ struct ReconciliationFixedPointTests {
         #expect(snapshots == [first, second])
         #expect(await handled.snapshot() == [first.id, second.id])
         #expect(await finished.snapshot() == [first.id, second.id])
-        #expect(await currentQueryCount.value() == 3)
-        #expect(await unfinishedQueryCount.value() == 3)
+        #expect(await currentQueryCount.value() == 1)
+        #expect(await unfinishedQueryCount.value() == 4)
         #expect(await reports.snapshot().isEmpty)
     }
 
     @Test("only the stable query reports current entitlement verification failures")
     func reportsStableVerificationFailuresOnce() async throws {
-        let snapshot = makeSnapshot(
+        let first = makeSnapshot(
             id: 43,
-            productID: "lifetime.verified",
+            productID: "lifetime.first",
             productType: .nonConsumable,
-            jws: "fixed-point-verification"
+            jws: "fixed-point-verification-first"
+        )
+        let second = makeSnapshot(
+            id: 47,
+            productID: "lifetime.second",
+            productType: .nonConsumable,
+            jws: "fixed-point-verification-second"
         )
         let current = EntitlementValueSource([])
         let unfinished = UnfinishedValueSource()
@@ -97,17 +103,29 @@ struct ReconciliationFixedPointTests {
         let finishes = TestSignal()
         let reports = StringRecorder()
 
-        let persistentDelivery = StoreTransactionDelivery.verified(
-            makeEnvelope(snapshot: snapshot)
+        let persistentFirst = StoreTransactionDelivery.verified(
+            makeEnvelope(snapshot: first)
         )
-        let initialDelivery = StoreTransactionDelivery.verified(
-            makeEnvelope(snapshot: snapshot) {
-                await current.replace(with: [snapshot])
-                await unfinished.replace(with: [persistentDelivery])
+        let persistentSecond = StoreTransactionDelivery.verified(
+            makeEnvelope(snapshot: second)
+        )
+        let secondDelivery = StoreTransactionDelivery.verified(
+            makeEnvelope(snapshot: second) {
+                await current.replace(with: [first, second])
+                await unfinished.replace(
+                    with: [persistentFirst, persistentSecond]
+                )
                 await finishes.send()
             }
         )
-        await unfinished.replace(with: [initialDelivery])
+        let firstDelivery = StoreTransactionDelivery.verified(
+            makeEnvelope(snapshot: first) {
+                await current.replace(with: [first])
+                await unfinished.replace(with: [persistentFirst])
+                await finishes.send()
+            }
+        )
+        await unfinished.replace(with: [firstDelivery])
 
         let core = TransactionProcessingCore<StoreTransactionSnapshot> { _ in
             await handlerCalls.send()
@@ -133,6 +151,11 @@ struct ReconciliationFixedPointTests {
             query: {
                 await currentQueryCount.send()
                 let queryNumber = await currentQueryCount.value()
+                if queryNumber == 1 {
+                    await unfinished.replace(
+                        with: [persistentFirst, secondDelivery]
+                    )
+                }
                 let underlyingError: any Error =
                     if queryNumber == 1 {
                         DiscardedVerificationFailure()
@@ -162,11 +185,11 @@ struct ReconciliationFixedPointTests {
 
         await core.finishInputAndDrain()
         await failures.sealAndDrain()
-        #expect(snapshots == [snapshot])
+        #expect(snapshots == [first, second])
         #expect(await currentQueryCount.value() == 2)
-        #expect(await unfinishedQueryCount.value() == 2)
-        #expect(await handlerCalls.value() == 1)
-        #expect(await finishes.value() == 1)
+        #expect(await unfinishedQueryCount.value() == 5)
+        #expect(await handlerCalls.value() == 2)
+        #expect(await finishes.value() == 2)
         #expect(await reports.snapshot() == ["stable"])
     }
 
@@ -245,6 +268,63 @@ struct ReconciliationFixedPointTests {
         await failures.sealAndDrain()
     }
 
+    @Test("unfinished work is durable before a current entitlement query failure")
+    func handlesUnfinishedBeforeCurrentQueryFailure() async throws {
+        let snapshot = makeSnapshot(
+            id: 48,
+            productID: "consumable.before-query-failure",
+            productType: .consumable,
+            jws: "unfinished-before-query-failure"
+        )
+        let unfinished = UnfinishedValueSource()
+        let events = StringRecorder()
+        let reports = StringRecorder()
+        let delivery = StoreTransactionDelivery.verified(
+            makeEnvelope(snapshot: snapshot) {
+                await events.append("finish")
+                await unfinished.replace(with: [])
+            }
+        )
+        await unfinished.replace(with: [delivery])
+
+        let core = TransactionProcessingCore<StoreTransactionSnapshot> { _ in
+            await events.append("handle")
+        }
+        let failures = FailureReporterDispatcher { failure in
+            await reports.append("\(failure.source)")
+        }
+        let reconciler = CurrentEntitlementReconciler(
+            query: {
+                await events.append("current-entitlements")
+                throw CurrentEntitlementQueryFailure()
+            },
+            queryUnfinished: {
+                await events.append("unfinished")
+                return await unfinished.read()
+            },
+            core: core,
+            failures: failures
+        )
+
+        await #expect(throws: CurrentEntitlementQueryFailure.self) {
+            _ = try await reconciler.query(
+                retryFailedTransactions: false
+            )
+        }
+
+        #expect(
+            await events.snapshot() == [
+                "unfinished",
+                "handle",
+                "finish",
+                "unfinished",
+                "current-entitlements",
+            ])
+        #expect(await reports.snapshot().isEmpty)
+        await core.finishInputAndDrain()
+        await failures.sealAndDrain()
+    }
+
     @Test("a persistent unverified unfinished delivery is reported by the stable query once")
     func persistentUnverifiedUnfinishedReportsOnce() async throws {
         let snapshot = makeSnapshot(
@@ -308,8 +388,8 @@ struct ReconciliationFixedPointTests {
         )
 
         #expect(snapshots == [snapshot])
-        #expect(await currentQueryCount.value() == 2)
-        #expect(await unfinishedQueryCount.value() == 2)
+        #expect(await currentQueryCount.value() == 1)
+        #expect(await unfinishedQueryCount.value() == 3)
         #expect(await handlerCalls.value() == 1)
         #expect(await finishes.value() == 1)
         #expect(await reports.snapshot() == ["unverified"])
@@ -326,6 +406,7 @@ struct ReconciliationFixedPointTests {
         )
         let finishes = TestSignal()
         let reports = StringRecorder()
+        let unfinishedQueryCount = TestSignal()
         let currentFailure = StoreTransactionVerificationError(
             underlyingError: TerminalCurrentVerificationFailure()
         )
@@ -371,7 +452,11 @@ struct ReconciliationFixedPointTests {
                 )
             },
             queryUnfinished: {
-                [
+                await unfinishedQueryCount.send()
+                guard await unfinishedQueryCount.value() > 1 else {
+                    return []
+                }
+                return [
                     .unverified(TerminalUnfinishedVerificationFailure()),
                     .verified(
                         makeEnvelope(snapshot: snapshot) {
@@ -415,3 +500,5 @@ private struct PersistentUnfinishedVerificationFailure: Error, Sendable {}
 private struct TerminalUnfinishedVerificationFailure: Error, Sendable {}
 
 private struct TerminalCurrentVerificationFailure: Error, Sendable {}
+
+private struct CurrentEntitlementQueryFailure: Error, Sendable {}

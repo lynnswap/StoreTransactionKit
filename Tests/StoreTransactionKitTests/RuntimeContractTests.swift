@@ -808,8 +808,8 @@ struct RuntimeContractTests {
         await failures.sealAndDrain()
     }
 
-    @Test("reconciliation requeries after handling a newly unfinished revision")
-    func reconciliationRequeriesAfterUnfinishedHandling() async throws {
+    @Test("reconciliation handles a new unfinished revision before querying entitlements")
+    func reconciliationHandlesUnfinishedBeforeQuerying() async throws {
         let entitlementQueryCount = TestSignal()
         let unfinishedQueryStarted = TestSignal()
         let unfinishedQueryGate = TestGate()
@@ -854,13 +854,13 @@ struct RuntimeContractTests {
             try await reconciler.query(retryFailedTransactions: false)
         }
         try await unfinishedQueryStarted.wait(for: 1)
-        #expect(await entitlementQueryCount.value() == 1)
+        #expect(await entitlementQueryCount.value() == 0)
 
         await unfinishedQueryGate.open()
         let snapshots = try await query.value
 
         #expect(snapshots == [snapshot])
-        #expect(await entitlementQueryCount.value() == 2)
+        #expect(await entitlementQueryCount.value() == 1)
         #expect(await handlerCalls.value() == 1)
         #expect(await finishes.value() == 1)
         await core.finishInputAndDrain()

@@ -15,6 +15,12 @@ package final class CurrentEntitlementReconciler: Sendable {
         }
     }
 
+    private struct UnfinishedBatch: Sendable {
+        let revisions: Set<Data>
+        let acceptedTransactions: [AcceptedTransaction]
+        let verificationFailures: [any Error]
+    }
+
     private let currentEntitlements: @Sendable () async throws -> CurrentEntitlementQueryResult
     private let queryUnfinished: @Sendable () async -> [StoreTransactionDelivery]
     private let core: TransactionProcessingCore<StoreTransactionSnapshot>
@@ -42,51 +48,86 @@ package final class CurrentEntitlementReconciler: Sendable {
             await core.beginRetryAttempt()
         }
         var reconciledRevisions: Set<Data> = []
+        var batch = await unfinishedBatch(
+            excluding: reconciledRevisions
+        )
+        var precedingCurrentVerificationFailures: [StoreTransactionVerificationError] = []
 
         while true {
-            let result = try await currentEntitlements()
-            var iterationRevisions: Set<Data> = []
-            var acceptedTransactions: [AcceptedTransaction] = []
-            var unfinishedVerificationFailures: [any Error] = []
-
-            for delivery in await queryUnfinished() {
-                switch delivery {
-                case .verified(let envelope):
-                    guard
-                        !reconciledRevisions.contains(envelope.revision),
-                        iterationRevisions.insert(envelope.revision).inserted
-                    else {
-                        continue
-                    }
-                    acceptedTransactions.append(
-                        AcceptedTransaction(
-                            snapshot: envelope.value,
-                            acceptance: await core.accept(envelope)
-                        ))
-                case .unverified(let error):
-                    unfinishedVerificationFailures.append(error)
+            while !batch.acceptedTransactions.isEmpty {
+                do {
+                    try await drain(batch.acceptedTransactions)
+                } catch {
+                    await reportVerificationFailures(
+                        unfinished: batch.verificationFailures,
+                        currentEntitlements:
+                            precedingCurrentVerificationFailures
+                    )
+                    throw error
                 }
+                reconciledRevisions.formUnion(batch.revisions)
+                batch = await unfinishedBatch(
+                    excluding: reconciledRevisions
+                )
             }
 
-            guard !acceptedTransactions.isEmpty else {
+            let result: CurrentEntitlementQueryResult
+            do {
+                result = try await currentEntitlements()
+            } catch {
+                await reportUnfinishedVerificationFailures(
+                    batch.verificationFailures
+                )
+                throw error
+            }
+
+            let postQueryBatch = await unfinishedBatch(
+                excluding: reconciledRevisions
+            )
+            guard !postQueryBatch.acceptedTransactions.isEmpty else {
                 await reportVerificationFailures(
-                    unfinished: unfinishedVerificationFailures,
+                    unfinished: postQueryBatch.verificationFailures,
                     currentEntitlements: result.verificationFailures
                 )
                 return result.snapshots
             }
-
-            do {
-                try await drain(acceptedTransactions)
-            } catch {
-                await reportVerificationFailures(
-                    unfinished: unfinishedVerificationFailures,
-                    currentEntitlements: result.verificationFailures
-                )
-                throw error
-            }
-            reconciledRevisions.formUnion(iterationRevisions)
+            batch = postQueryBatch
+            precedingCurrentVerificationFailures =
+                result.verificationFailures
         }
+    }
+
+    private func unfinishedBatch(
+        excluding reconciledRevisions: Set<Data>
+    ) async -> UnfinishedBatch {
+        var revisions: Set<Data> = []
+        var acceptedTransactions: [AcceptedTransaction] = []
+        var verificationFailures: [any Error] = []
+
+        for delivery in await queryUnfinished() {
+            switch delivery {
+            case .verified(let envelope):
+                guard
+                    !reconciledRevisions.contains(envelope.revision),
+                    revisions.insert(envelope.revision).inserted
+                else {
+                    continue
+                }
+                acceptedTransactions.append(
+                    AcceptedTransaction(
+                        snapshot: envelope.value,
+                        acceptance: await core.accept(envelope)
+                    ))
+            case .unverified(let error):
+                verificationFailures.append(error)
+            }
+        }
+
+        return UnfinishedBatch(
+            revisions: revisions,
+            acceptedTransactions: acceptedTransactions,
+            verificationFailures: verificationFailures
+        )
     }
 
     private func reportVerificationFailures(

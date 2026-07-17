@@ -378,11 +378,8 @@ struct StoreTests {
 
         try await query.waitForRequest(1)
         #expect(await startupCompleted.value() == 0)
-
-        await query.succeed([])
         try await closeRejected.wait(for: 1)
-        try await query.waitForRequest(2)
-        #expect(await startupCompleted.value() == 0)
+
         await query.succeed([])
         await startupWaiter.value
         #expect(await startupCompleted.value() == 1)
