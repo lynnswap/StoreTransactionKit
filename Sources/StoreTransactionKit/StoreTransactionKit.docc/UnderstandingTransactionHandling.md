@@ -22,10 +22,12 @@ idempotent across process launches and cache eviction.
 
 Startup and every entitlement refresh query `Transaction.unfinished` and
 durably handle each verified delivery — including consumables — before the
-entitlement projection is published. Published entitlement state therefore
-never runs ahead of the durable ledger: a purchase made on another device is
-handled and finished before it appears in
-``TransactionStore/activeEntitlements``.
+entitlement projection is published, so published entitlement state never
+runs ahead of the durable ledger for transactions this device still reports
+as unfinished. A transaction that was already finished elsewhere — on another
+device, or by a previous process — can appear in the projection without a
+local handler invocation; while the app is running, purchases completed on
+other devices reach the handler through `Transaction.updates`.
 
 When the handler throws, the transaction is not finished and that refresh (or
 startup readiness) fails with the handler's error. The failed work is not
@@ -38,8 +40,11 @@ retry.
 ## Verification
 
 Snapshots exist only for transactions that StoreKit verified; the handler and
-the projection never observe unverified data. Unverified deliveries are
-reported through the failure callback instead:
+the projection never observe unverified data. An unverified purchase result
+passed to ``TransactionStore/process(_:)`` throws a
+``StoreTransactionVerificationError`` to that caller and is not reported to
+the failure callback. Unverified deliveries on paths with no attached caller
+are reported through the failure callback instead:
 
 - From `Transaction.updates`, with source
   ``StoreTransactionBackgroundFailure/Source/updates``.

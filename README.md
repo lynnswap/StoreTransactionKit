@@ -12,7 +12,7 @@ The store owns the durable transaction path for the process lifetime:
 - Monitoring: `Transaction.updates`, `Transaction.unfinished` reconciliation,
   and subscription status changes
 - Verification: only verified transactions reach your code; unverified
-  elements are skipped and reported
+  deliveries surface as thrown errors or reported failures
 - Ordering: durable handling first, then `finish()`, with at-least-once
   delivery to an idempotent handler and exact-revision deduplication
 - State: the observable current-entitlement projection, restore
