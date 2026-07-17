@@ -41,6 +41,34 @@ struct RuntimeContractTests {
         #expect(await waiter.value)
     }
 
+    @Test("immediate purchase outcomes return their semantic values")
+    func immediatePurchaseOutcomes() async throws {
+        let fixture = TestSourceFixture()
+        fixture.unfinished.finish()
+        let handlerCalls = TestSignal()
+        let reports = StringRecorder()
+        let session = StoreTransactionSession(
+            source: fixture.source,
+            handleTransaction: { _ in
+                await handlerCalls.send()
+            },
+            reportFailure: { failure in
+                await reports.append("\(failure.source)")
+            }
+        )
+        _ = try await session.start()
+
+        let pending = try await session.process(.pending)
+        let userCancelled = try await session.process(.userCancelled)
+
+        #expect(pending == .pending)
+        #expect(userCancelled == .userCancelled)
+        #expect(await handlerCalls.value() == 0)
+        #expect(await fixture.entitlementQueryCount.value() == 1)
+        #expect(await reports.snapshot().isEmpty)
+        try await session.close()
+    }
+
     @Test("immediate purchase outcomes honor caller cancellation")
     func immediatePurchaseOutcomeCancellation() async throws {
         let fixture = TestSourceFixture()
