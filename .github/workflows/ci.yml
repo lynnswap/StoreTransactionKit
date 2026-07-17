@@ -126,8 +126,8 @@ jobs:
         run: |
           simulator_id="$(xcrun simctl list devices available --json | ruby -rjson -e '
             runtimes = JSON.parse(STDIN.read).fetch("devices")
-            _, devices = runtimes.find { |name, _| name.end_with?(".iOS-26-4") }
-            abort("The iOS 26.4 Simulator runtime is required for StoreKit tests") unless devices
+            _, devices = runtimes.find { |name, _| name.end_with?(".iOS-26-2") }
+            abort("The iOS 26.2 Simulator runtime is required for StoreKit tests") unless devices
             device = devices.find { |candidate| candidate["isAvailable"] && candidate["name"].start_with?("iPhone") }
             abort("No available iPhone with iOS 26.4 found") unless device
             puts device.fetch("udid")

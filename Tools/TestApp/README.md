@@ -37,7 +37,7 @@ signals. They don't use fixed sleeps or accelerated wall-clock time. A suite
 time limit exists only to surface a missing event as a failed test instead of
 hanging the test process.
 
-CI runs this suite with Xcode 26.5 on the iOS 26.4 simulator available in the
+CI runs this suite with Xcode 26.5 on the iOS 26.2 simulator available in the
 GitHub macOS 26 image. The same suite is also validated locally with Xcode 26.5
 on iOS 18.6 to cover the supported iOS 18 line.
 
