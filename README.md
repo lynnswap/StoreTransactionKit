@@ -241,7 +241,8 @@ Both callback contracts are documented on `TransactionStore.init`.
 ## How entitlement availability behaves
 
 - `entitlementStatus` is `.loading` before the first readiness result,
-  `.failed(error)` after a readiness failure, and `.ready` after success.
+  `.failed(error)` when no usable catalog projection is available, and `.ready`
+  when raw and typed entitlement state is available.
 - `activeEntitlements` is `nil` while `entitlementStatus` is `.loading` or
   `.failed`. When the status is `.ready`, an empty set means no catalog
   entitlement is active.
@@ -249,8 +250,11 @@ Both callback contracts are documented on `TransactionStore.init`.
   Consult `entitlementStatus` only when the app needs to explain why the
   entitlement set is unavailable.
 - A successful refresh after `.failed` publishes `.ready` and the new active
-  entitlement set. A background refresh failure after `.ready` preserves the
-  last active set and reports the failure through `reportFailure`.
+  entitlement set. A background query or transaction-handler failure after
+  `.ready` preserves the last active set and reports the failure through
+  `reportFailure`.
+- A verified catalog mismatch fails closed: it changes the status to `.failed`
+  and clears both entitlement projections instead of preserving stale access.
 - Startup and every refresh reconcile `Transaction.unfinished` — including
   consumables — before publishing state. A handler failure fails that refresh;
   the next refresh retries the unfinished work.
