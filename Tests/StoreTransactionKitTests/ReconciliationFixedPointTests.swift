@@ -165,8 +165,146 @@ struct ReconciliationFixedPointTests {
         #expect(await finishes.value() == 1)
         #expect(await reports.snapshot() == ["stable"])
     }
+
+    @Test("a failed unfinished consumable blocks readiness and remains retryable")
+    func failedUnfinishedConsumableIsRetryable() async throws {
+        let snapshot = makeSnapshot(
+            id: 44,
+            productID: "consumable.tokens",
+            productType: .consumable,
+            jws: "unfinished-consumable"
+        )
+        let unfinished = UnfinishedValueSource()
+        let handlerCalls = TestSignal()
+        let finishes = TestSignal()
+        let reports = StringRecorder()
+        let delivery = StoreTransactionDelivery.verified(
+            makeEnvelope(snapshot: snapshot) {
+                await finishes.send()
+                await unfinished.replace(with: [])
+            }
+        )
+        await unfinished.replace(with: [delivery])
+
+        let core = TransactionProcessingCore<StoreTransactionSnapshot> { _ in
+            await handlerCalls.send()
+            if await handlerCalls.value() == 1 {
+                throw TestFailure()
+            }
+        }
+        let failures = FailureReporterDispatcher { failure in
+            guard failure.source == .unfinished,
+                failure.transactionID == snapshot.id,
+                failure.productID == snapshot.productID,
+                failure.underlyingError is TestFailure
+            else {
+                await reports.append("unexpected")
+                return
+            }
+            await reports.append("unfinished-\(snapshot.id)")
+        }
+        let reconciler = CurrentEntitlementReconciler(
+            query: {
+                CurrentEntitlementQueryResult(
+                    snapshots: [],
+                    verificationFailures: []
+                )
+            },
+            queryUnfinished: { await unfinished.read() },
+            core: core,
+            failures: failures
+        )
+
+        await #expect(throws: TestFailure.self) {
+            _ = try await reconciler.query()
+        }
+        #expect(await handlerCalls.value() == 1)
+        #expect(await finishes.value() == 0)
+        #expect(await reports.snapshot() == ["unfinished-44"])
+
+        let snapshots = try await reconciler.query()
+
+        #expect(snapshots.isEmpty)
+        #expect(await handlerCalls.value() == 2)
+        #expect(await finishes.value() == 1)
+        #expect(await reports.snapshot() == ["unfinished-44"])
+        await core.finishInputAndDrain()
+        await failures.sealAndDrain()
+    }
+
+    @Test("a persistent unverified unfinished delivery is reported by the stable query once")
+    func persistentUnverifiedUnfinishedReportsOnce() async throws {
+        let snapshot = makeSnapshot(
+            id: 45,
+            productID: "lifetime.verified",
+            productType: .nonConsumable,
+            jws: "unfinished-verification-fixed-point"
+        )
+        let current = EntitlementValueSource([])
+        let unfinished = UnfinishedValueSource()
+        let currentQueryCount = TestSignal()
+        let unfinishedQueryCount = TestSignal()
+        let handlerCalls = TestSignal()
+        let finishes = TestSignal()
+        let reports = StringRecorder()
+        let unverified = StoreTransactionDelivery.unverified(
+            PersistentUnfinishedVerificationFailure()
+        )
+        let verified = StoreTransactionDelivery.verified(
+            makeEnvelope(snapshot: snapshot) {
+                await finishes.send()
+                await current.replace(with: [snapshot])
+                await unfinished.replace(with: [unverified])
+            }
+        )
+        await unfinished.replace(with: [unverified, verified])
+
+        let core = TransactionProcessingCore<StoreTransactionSnapshot> { _ in
+            await handlerCalls.send()
+        }
+        let failures = FailureReporterDispatcher { failure in
+            guard failure.source == .unfinished,
+                failure.transactionID == nil,
+                failure.productID == nil,
+                failure.underlyingError
+                    is PersistentUnfinishedVerificationFailure
+            else {
+                await reports.append("unexpected")
+                return
+            }
+            await reports.append("unverified")
+        }
+        let reconciler = CurrentEntitlementReconciler(
+            query: {
+                await currentQueryCount.send()
+                return CurrentEntitlementQueryResult(
+                    snapshots: await current.read(),
+                    verificationFailures: []
+                )
+            },
+            queryUnfinished: {
+                await unfinishedQueryCount.send()
+                return await unfinished.read()
+            },
+            core: core,
+            failures: failures
+        )
+
+        let snapshots = try await reconciler.query()
+
+        #expect(snapshots == [snapshot])
+        #expect(await currentQueryCount.value() == 2)
+        #expect(await unfinishedQueryCount.value() == 2)
+        #expect(await handlerCalls.value() == 1)
+        #expect(await finishes.value() == 1)
+        #expect(await reports.snapshot() == ["unverified"])
+        await core.finishInputAndDrain()
+        await failures.sealAndDrain()
+    }
 }
 
 private struct DiscardedVerificationFailure: Error, Sendable {}
 
 private struct StableVerificationFailure: Error, Sendable {}
+
+private struct PersistentUnfinishedVerificationFailure: Error, Sendable {}

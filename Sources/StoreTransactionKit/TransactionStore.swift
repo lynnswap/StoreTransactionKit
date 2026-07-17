@@ -46,11 +46,12 @@ where
         }
     }
 
-    /// The error from the initial entitlement query when startup did not reach
-    /// readiness.
+    /// The error from the initial readiness attempt.
     ///
-    /// Transaction monitoring remains active after a recoverable startup query
-    /// failure. A later successful entitlement refresh clears this value.
+    /// Startup includes durable handling of every verified transaction still
+    /// reported by `Transaction.unfinished`. Transaction monitoring remains
+    /// active after a recoverable startup failure. A later successful
+    /// entitlement refresh retries unfinished work and clears this value.
     public private(set) var startupError: (any Error)?
 
     @ObservationIgnored private let sessionID: UUID
@@ -137,6 +138,11 @@ where
     }
 
     /// Refreshes current entitlements and updates observable store state.
+    ///
+    /// Before publishing the result, the store durably handles every verified
+    /// transaction currently reported by `Transaction.unfinished`, including
+    /// consumables. A handler failure leaves the transaction unfinished, fails
+    /// this refresh, and allows a later refresh to retry it.
     ///
     /// - Returns: The complete verified entitlement projection.
     @discardableResult

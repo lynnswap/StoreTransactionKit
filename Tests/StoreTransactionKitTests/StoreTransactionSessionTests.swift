@@ -234,57 +234,6 @@ struct StoreTransactionSessionTests {
         try await session.close()
     }
 
-    @Test("unrelated unfinished work does not block entitlement removal")
-    func unrelatedUnfinishedDoesNotBlockRemoval() async throws {
-        let snapshot = makeSnapshot(id: 3, productID: "subscription.plus")
-        let values = EntitlementValueSource([snapshot])
-        let unfinished = UnfinishedValueSource()
-        let fixture = TestSourceFixture(
-            currentEntitlements: { await values.read() },
-            queryUnfinished: { await unfinished.read() }
-        )
-        fixture.unfinished.finish()
-        let handlerCalls = TestSignal()
-        let publications = UInt64Recorder()
-        let published = TestSignal()
-        let session = StoreTransactionSession(
-            source: fixture.source,
-            handleTransaction: { _ in
-                await handlerCalls.send()
-                throw TestFailure()
-            },
-            entitlementsDidChange: { value in
-                await publications.append(UInt64(value.transactions.count))
-                await published.send()
-            },
-            reportFailure: { failure in
-                Issue.record("Unexpected background failure: \(failure)")
-            }
-        )
-
-        _ = try await session.start()
-        await values.replace(with: [])
-        await unfinished.replace(
-            with: [
-                .verified(
-                    makeEnvelope(
-                        snapshot: makeSnapshot(
-                            id: 4,
-                            productID: "consumable.tokens"
-                        )
-                    )
-                )
-            ]
-        )
-
-        fixture.subscriptionStatusUpdates.yield()
-        try await published.wait(for: 2)
-
-        #expect(await handlerCalls.value() == 0)
-        #expect(await publications.snapshot() == [1, 0])
-        try await session.close()
-    }
-
     @Test("revocation handling finishes before entitlement removal is published")
     func revocationPrecedesRemovalPublication() async throws {
         let active = makeSnapshot(

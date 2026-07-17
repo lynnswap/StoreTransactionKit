@@ -32,20 +32,14 @@ package final class CurrentEntitlementReconciler: Sendable {
 
         while true {
             let result = try await currentEntitlements()
-            let currentRevisions = Set(
-                result.snapshots.map { Data($0.jwsRepresentation.utf8) }
-            )
             var iterationRevisions: Set<Data> = []
             var acceptedTransactions: [AcceptedTransaction] = []
+            var unfinishedVerificationFailures: [any Error] = []
 
             for delivery in await queryUnfinished() {
                 switch delivery {
                 case .verified(let envelope):
-                    let canChangeEntitlements =
-                        envelope.value.productType != .consumable
                     guard
-                        currentRevisions.contains(envelope.revision)
-                            || canChangeEntitlements,
                         !reconciledRevisions.contains(envelope.revision),
                         iterationRevisions.insert(envelope.revision).inserted
                     else {
@@ -56,18 +50,36 @@ package final class CurrentEntitlementReconciler: Sendable {
                             snapshot: envelope.value,
                             acceptance: await core.accept(envelope)
                         ))
-                case .unverified:
-                    continue
+                case .unverified(let error):
+                    unfinishedVerificationFailures.append(error)
                 }
             }
 
             guard !acceptedTransactions.isEmpty else {
+                await reportUnfinishedVerificationFailures(
+                    unfinishedVerificationFailures
+                )
                 await reportVerificationFailures(result.verificationFailures)
                 return result.snapshots
             }
 
             try await drain(acceptedTransactions)
             reconciledRevisions.formUnion(iterationRevisions)
+        }
+    }
+
+    private func reportUnfinishedVerificationFailures(
+        _ verificationFailures: [any Error]
+    ) async {
+        for failure in verificationFailures {
+            await failures.enqueue(
+                StoreTransactionBackgroundFailure(
+                    source: .unfinished,
+                    transactionID: nil,
+                    productID: nil,
+                    underlyingError: failure
+                )
+            )
         }
     }
 

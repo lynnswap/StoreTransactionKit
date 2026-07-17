@@ -64,6 +64,13 @@ func makeStore(
 changes during initialization. Retain one instance in the application's
 process-lifetime composition.
 
+Startup and each entitlement refresh reconcile `Transaction.unfinished`
+before publishing entitlement state. Every verified delivery is durably
+handled, including consumables. If the handler fails, startup or the refresh
+fails, the transaction remains unfinished, and a later refresh retries it.
+An unverified unfinished delivery is sent to `reportFailure` with source
+`.unfinished`.
+
 `activeEntitlements` contains the app-defined identifiers represented by
 StoreKit's current entitlements. It is `nil` while the initial entitlement
 query is unresolved and becomes a non-`nil` empty set when no known

@@ -10,6 +10,12 @@ StoreKit can deliver a purchase as a direct `Product.PurchaseResult`, through
 ``TransactionStore`` normalizes these paths into one verified, FIFO transaction
 processor and publishes observable current-entitlement state.
 
+Startup and entitlement refreshes reconcile every verified transaction still
+reported by `Transaction.unfinished`, including consumables, before publishing
+entitlement state. A durable handler failure fails readiness or the refresh and
+leaves that transaction available for a later retry. Unverified unfinished
+deliveries are reported through ``StoreTransactionBackgroundFailure/Source/unfinished``.
+
 Create one store in the application composition root. Supply an idempotent
 transaction handler that commits the app's business effect before returning.
 The app defines a string-backed entitlement identifier type;

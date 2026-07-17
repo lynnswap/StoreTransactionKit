@@ -31,7 +31,7 @@ public struct StoreTransactionBackgroundFailure: Error, Sendable {
         /// A delivery from `Transaction.updates`.
         case updates
 
-        /// A delivery from `Transaction.unfinished` during startup.
+        /// A delivery from `Transaction.unfinished` during monitoring or reconciliation.
         case unfinished
 
         /// A refresh requested after background processing completed.
