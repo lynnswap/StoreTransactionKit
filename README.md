@@ -8,6 +8,10 @@ observable store.
 
 - iOS 18.4+
 - macOS 15.4+
+- Mac Catalyst 18.4+
+- tvOS 18.4+
+- watchOS 11.4+
+- visionOS 2.4+
 - Swift 6.3+
 
 ## What it owns — and what your app owns
@@ -25,10 +29,12 @@ The store owns the durable transaction path for the process lifetime:
 
 Your app owns everything the user sees and everything it persists:
 
-- Paywall and purchase UI (StoreKit views or `Product.purchase`)
+- Paywall and purchase UI (StoreKit views or the platform-appropriate
+  StoreKit purchase action)
 - The durable ledger that the transaction handler writes to
 - Subscription status presentation (`Product.SubscriptionInfo.Status`)
-- Purchases that begin outside the app (`PurchaseIntent.intents`)
+- Purchases that begin outside the app on platforms that provide
+  `PurchaseIntent.intents`
 
 ## Quick start
 
@@ -208,15 +214,16 @@ For the full delivery, reconciliation, and failure-reporting model, see
 
 ## Beyond the basics
 
-- **Custom purchase UI** — load products and purchase with StoreKit, then pass
-  the `Product.PurchaseResult` to `store.process(_:)`. `.pending` outcomes
-  arrive later through the handler.
+- **Custom purchase UI** — load products and start the purchase with StoreKit
+  views, SwiftUI's `PurchaseAction`, or the platform-appropriate `Product`
+  purchase API. Pass the resulting `Product.PurchaseResult` to
+  `store.process(_:)`; `.pending` outcomes arrive later through the handler.
 - **Restore** — call `store.restorePurchases()` only from an explicit user
   action; `AppStore.sync()` presents authentication UI, and
   `StoreKitError.userCancelled` is a normal outcome, not a diagnostic failure.
-- **Promoted purchases and win-back offers** — the app owns
-  `PurchaseIntent.intents`: complete each intent's purchase and pass the
-  result to `store.process(_:)`.
+- **Promoted purchases and win-back offers** — on platforms that provide
+  `PurchaseIntent.intents`, the app completes each intent's purchase and
+  passes the result to `store.process(_:)`.
 - **Renewal, grace-period, and billing-retry UI** — read
   `Product.SubscriptionInfo.Status` directly; the store owns the durable
   transaction path, not subscription status presentation.
@@ -225,6 +232,9 @@ For product merchandising and UI composition, use Apple's
 [Getting started with In-App Purchase using StoreKit views](https://developer.apple.com/documentation/storekit/getting-started-with-in-app-purchases-using-storekit-views)
 and
 [Implementing a store in your app using the StoreKit API](https://developer.apple.com/documentation/storekit/implementing-a-store-in-your-app-using-the-storekit-api).
+Apple's
+[purchase API guidance](https://developer.apple.com/documentation/storekit/product/purchase(options:))
+explains which purchase entry point to use for each UI framework and platform.
 
 ## Testing
 

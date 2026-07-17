@@ -4,6 +4,9 @@ import StoreKit
 import StoreKitTest
 import StoreTransactionKit
 import Testing
+#if os(visionOS)
+    import UIKit
+#endif
 
 private enum Entitlement: String, Hashable, Sendable {
     case lifetime = "com.example.StoreTransactionKit.lifetime"
@@ -77,7 +80,8 @@ struct StoreTransactionKitIntegrationTests {
         try await withTestContext { context in
             let product = try await context.product(.plus)
             let appAccountToken = UUID()
-            let result = try await product.purchase(
+            let result = try await purchase(
+                product,
                 options: [.appAccountToken(appAccountToken)]
             )
 
@@ -221,7 +225,7 @@ struct StoreTransactionKitIntegrationTests {
         try await withTestContext { context in
             context.session.interruptedPurchasesEnabled = true
             let product = try await context.product(.plus)
-            let result = try await product.purchase()
+            let result = try await purchase(product)
             guard case .pending = result else {
                 Issue.record("Expected the interrupted purchase to remain pending.")
                 return
@@ -531,7 +535,7 @@ struct StoreTransactionKitIntegrationTests {
         try await withTestContext { context in
             context.session.askToBuyEnabled = true
             let product = try await context.product(.plus)
-            let result = try await product.purchase()
+            let result = try await purchase(product)
 
             let outcome = try await context.store.process(result)
 
@@ -556,7 +560,7 @@ struct StoreTransactionKitIntegrationTests {
         try await withTestContext { context in
             context.session.askToBuyEnabled = true
             let product = try await context.product(.plus)
-            let result = try await product.purchase()
+            let result = try await purchase(product)
 
             let outcome = try await context.store.process(result)
 
@@ -582,6 +586,23 @@ struct StoreTransactionKitIntegrationTests {
                 }
             )
         }
+    }
+
+    private func purchase(
+        _ product: Product,
+        options: Set<Product.PurchaseOption> = []
+    ) async throws -> Product.PurchaseResult {
+        #if os(visionOS)
+            let scene = try #require(
+                UIApplication.shared.connectedScenes.first {
+                    $0.activationState == .foregroundActive
+                },
+                "The visionOS test host does not have a foreground scene."
+            )
+            return try await product.purchase(confirmIn: scene, options: options)
+        #else
+            return try await product.purchase(options: options)
+        #endif
     }
 
     private func withTestContext(

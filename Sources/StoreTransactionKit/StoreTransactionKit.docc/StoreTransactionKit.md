@@ -9,7 +9,8 @@ StoreKit can deliver a purchase as a direct `Product.PurchaseResult`, through
 `Transaction.updates`, or as unfinished work on a later launch.
 ``TransactionStore`` normalizes these paths into one verified, FIFO transaction
 processor and publishes observable current-entitlement state. It supports
-iOS 18.4 and later and macOS 15.4 and later.
+iOS and Mac Catalyst 18.4 and later, macOS 15.4 and later, tvOS 18.4 and
+later, watchOS 11.4 and later, and visionOS 2.4 and later.
 
 Create one store in the application composition root and retain it for the
 process lifetime; call ``TransactionStore/close()`` only from controlled
@@ -30,8 +31,8 @@ coalescing, `finish()`, entitlement refresh, history ordering, restore
 synchronization, background failure delivery, and explicit shutdown. The app
 continues to own persistence, server communication, access presentation, the
 concrete purchase scene or window, raw `Product.SubscriptionInfo.Status`
-interpretation for renewal UI, and `PurchaseIntent.intents` handling for
-purchases that begin outside the app.
+interpretation for renewal UI, and, where the API is available,
+`PurchaseIntent.intents` handling for purchases that begin outside the app.
 
 > Important: StoreTransactionKit exposes an at-least-once handler-delivery
 > contract. Make the injected transaction handler durably idempotent using
