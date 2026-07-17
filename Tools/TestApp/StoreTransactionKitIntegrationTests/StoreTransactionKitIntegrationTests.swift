@@ -16,7 +16,7 @@ private enum Entitlement: String, Hashable, Sendable {
 struct StoreTransactionKitIntegrationTests {
     @Test
     func externalPurchaseIsHandledAndFinishedBeforePublication() async throws {
-        let session = try makeTestSession()
+        let session = try await makeTestSession()
         defer {
             session.resetToDefaultState()
             session.clearTransactions()
@@ -158,7 +158,7 @@ struct StoreTransactionKitIntegrationTests {
 
     @Test
     func unfinishedPurchaseReplaysUntilDurableHandlingSucceeds() async throws {
-        let session = try makeTestSession()
+        let session = try await makeTestSession()
         defer {
             session.resetToDefaultState()
             session.clearTransactions()
@@ -243,7 +243,7 @@ struct StoreTransactionKitIntegrationTests {
 
     @Test
     func unverifiedUpdateIsReportedAndRemainsUnfinished() async throws {
-        let session = try makeTestSession()
+        let session = try await makeTestSession()
         defer {
             session.resetToDefaultState()
             session.clearTransactions()
@@ -385,7 +385,7 @@ struct StoreTransactionKitIntegrationTests {
 
     @Test
     func renewalWaitsForDurableHandlingBeforeStatusPublication() async throws {
-        let session = try makeTestSession()
+        let session = try await makeTestSession()
         defer {
             session.resetToDefaultState()
             session.clearTransactions()
@@ -623,7 +623,7 @@ private final class TestContext {
         preexistingPurchaseOptions: Set<Product.PurchaseOption> = [],
         expectedEntitlements: Set<Entitlement>? = nil
     ) async throws {
-        let session = try makeTestSession()
+        let session = try await makeTestSession()
         self.session = session
         if let preexistingSubscription {
             _ = try await session.buyProduct(
@@ -865,7 +865,7 @@ private actor TestSignal {
 
 private struct DurableHandlingFailure: Error {}
 
-private func makeTestSession() throws -> SKTestSession {
+private func makeTestSession() async throws -> SKTestSession {
     let configuration = try #require(
         Bundle(for: BundleToken.self).url(
             forResource: "StoreKitTest",
@@ -877,7 +877,26 @@ private func makeTestSession() throws -> SKTestSession {
     session.timeRate = .realTime
     session.resetToDefaultState()
     session.clearTransactions()
+    try await StoreKitTestEnvironment.requireAvailable()
     return session
+}
+
+@MainActor
+private enum StoreKitTestEnvironment {
+    private static var isAvailable = false
+
+    static func requireAvailable() async throws {
+        guard !isAvailable else {
+            return
+        }
+        _ = try #require(
+            try await Product.products(
+                for: [Entitlement.lifetime.rawValue]
+            ).first,
+            "The StoreKit test configuration is not active."
+        )
+        isAvailable = true
+    }
 }
 
 private final class BundleToken {}
