@@ -1,8 +1,8 @@
 import Foundation
 
 /// A store operation that can appear in lifecycle and diagnostic errors.
-public enum StoreTransactionOperation: Sendable {
-    /// Processing a direct ``StoreKit/Product/PurchaseResult``.
+public enum StoreTransactionOperation: Sendable, Hashable {
+    /// Processing a direct `Product.PurchaseResult`.
     case processPurchase
 
     /// Refreshing the current entitlement projection.
@@ -27,15 +27,18 @@ package enum StoreTransactionCallback: Sendable {
 /// A failure produced by work that has no attached public caller.
 public struct StoreTransactionBackgroundFailure: Error, Sendable {
     /// The background path that produced the failure.
-    public enum Source: Sendable {
-        /// A delivery from ``StoreKit/Transaction/updates``.
+    public enum Source: Sendable, Hashable {
+        /// A delivery from `Transaction.updates`.
         case updates
 
-        /// A delivery from ``StoreKit/Transaction/unfinished`` during startup.
+        /// A delivery from `Transaction.unfinished` during monitoring or reconciliation.
         case unfinished
 
         /// A refresh requested after background processing completed.
         case entitlementRefresh
+
+        /// An unverified element omitted from the current entitlement projection.
+        case currentEntitlementVerification
 
         /// A direct operation whose caller cancelled after the session accepted it.
         case abandonedDirectOperation(StoreTransactionOperation)
@@ -66,8 +69,33 @@ public struct StoreTransactionBackgroundFailure: Error, Sendable {
     }
 }
 
+package struct StoreTransactionFailureWithReportingOwner: Error, Sendable {
+    package let underlyingError: any Error
+
+    package init(underlyingError: any Error) {
+        self.underlyingError = underlyingError
+    }
+}
+
+package struct StoreTransactionFailurePropagation: Sendable {
+    package let underlyingError: any Error
+    package let hasReportingOwner: Bool
+
+    package init(_ error: any Error) {
+        if let owned =
+            error as? StoreTransactionFailureWithReportingOwner
+        {
+            self.underlyingError = owned.underlyingError
+            self.hasReportingOwner = true
+        } else {
+            self.underlyingError = error
+            self.hasReportingOwner = false
+        }
+    }
+}
+
 /// An error caused by using a store outside its documented lifecycle.
-public enum StoreTransactionError: Error, Sendable {
+public enum StoreTransactionError: Error, Sendable, Hashable {
     /// The store has begun its shared close operation and accepts no new work.
     case closing
 
@@ -77,10 +105,13 @@ public enum StoreTransactionError: Error, Sendable {
     /// StoreKit returned a purchase result unknown to this framework version.
     case unknownPurchaseResult
 
-    /// A consumer callback attempted to synchronously reenter its own session.
+    /// A consumer callback attempted to reenter its own session.
     ///
-    /// Reentrancy is rejected because a callback can otherwise wait behind
-    /// itself or attempt to close the dispatcher that is executing it.
+    /// Reentrancy with propagated callback context is rejected because a
+    /// callback can otherwise wait behind itself or attempt to close the
+    /// dispatcher that is executing it. Callbacks must also avoid awaiting a
+    /// detached task that calls the same store: detached tasks don't carry the
+    /// callback context but can still create the same dependency cycle.
     case reentrantOperation(operation: StoreTransactionOperation)
 }
 
@@ -89,11 +120,18 @@ package enum StoreTransactionLifecycleError: Error, Sendable {
     case notStarted
 }
 
-package struct StoreTransactionVerificationError: LocalizedError, Sendable {
-    package let underlyingError: any Error
+/// An error StoreKit returns when transaction verification fails.
+public struct StoreTransactionVerificationError: LocalizedError, Sendable {
+    /// The verification error supplied by StoreKit.
+    public let underlyingError: any Error
 
-    package var errorDescription: String? {
+    /// A localized description of the underlying StoreKit verification error.
+    public var errorDescription: String? {
         underlyingError.localizedDescription
+    }
+
+    package init(underlyingError: any Error) {
+        self.underlyingError = underlyingError
     }
 }
 

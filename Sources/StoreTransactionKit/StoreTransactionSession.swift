@@ -15,6 +15,7 @@ package actor StoreTransactionSession {
         let source: StoreTransactionSource
         let handleTransaction: @Sendable (StoreTransactionSnapshot) async throws -> Void
         let entitlementsDidChange: @Sendable (StoreEntitlements) async -> Void
+        let entitlementRefreshDidSucceed: @Sendable (EntitlementRefreshSuccess) async -> Void
         let reportFailure: @Sendable (StoreTransactionBackgroundFailure) async -> Void
     }
 
@@ -32,9 +33,10 @@ package actor StoreTransactionSession {
     ///
     /// - Parameters:
     ///   - handleTransaction: Applies the durable business effect for a verified
-    ///     transaction. The handler must be idempotent because StoreKit delivery
-    ///     is at least once. StoreTransactionKit calls `finish()` only after this
-    ///     closure returns successfully.
+    ///     transaction. StoreTransactionKit exposes an at-least-once
+    ///     handler-delivery contract, so the handler must be idempotent.
+    ///     StoreTransactionKit calls `finish()` only after this closure returns
+    ///     successfully.
     ///   - entitlementsDidChange: Receives complete, ordered entitlement
     ///     snapshots when the current entitlement content changes.
     ///   - reportFailure: Receives failures from process-owned work that has no
@@ -56,6 +58,7 @@ package actor StoreTransactionSession {
                 source: .live,
                 handleTransaction: handleTransaction,
                 entitlementsDidChange: entitlementsDidChange,
+                entitlementRefreshDidSucceed: { _ in },
                 reportFailure: reportFailure
             ))
     }
@@ -67,6 +70,8 @@ package actor StoreTransactionSession {
             @escaping @Sendable (StoreTransactionSnapshot) async throws -> Void,
         entitlementsDidChange:
             @escaping @Sendable (StoreEntitlements) async -> Void = { _ in },
+        entitlementRefreshDidSucceed:
+            @escaping @Sendable (EntitlementRefreshSuccess) async -> Void = { _ in },
         reportFailure:
             @escaping @Sendable (StoreTransactionBackgroundFailure) async -> Void
     ) {
@@ -76,13 +81,14 @@ package actor StoreTransactionSession {
                 source: source,
                 handleTransaction: handleTransaction,
                 entitlementsDidChange: entitlementsDidChange,
+                entitlementRefreshDidSucceed: entitlementRefreshDidSucceed,
                 reportFailure: reportFailure
             ))
     }
 
     /// Starts transaction monitoring, reconciles unfinished work, and publishes initial entitlements.
     ///
-    /// Both StoreKit producer tasks are retained before this method first
+    /// All StoreKit producer tasks are retained before this method first
     /// suspends. The method returns only after the startup unfinished sequence,
     /// the initial entitlement query, and any initial entitlement callback have
     /// completed.
@@ -94,6 +100,20 @@ package actor StoreTransactionSession {
     /// - Throws: A lifecycle or callback reentrancy error, an entitlement query
     ///   error, or `CancellationError` when the attached waiter cancels.
     package func start() async throws -> StoreTransactionReadiness {
+        do {
+            return try await startPreservingReadinessFailure()
+        } catch let failure as StoreTransactionReadinessFailure {
+            throw failure.underlyingError
+        }
+    }
+
+    package func startForTransactionStore() async throws -> StoreTransactionReadiness {
+        try await startPreservingReadinessFailure()
+    }
+
+    private func startPreservingReadinessFailure() async throws
+        -> StoreTransactionReadiness
+    {
         guard case .initialized(let configuration) = state else {
             switch state {
             case .running: throw StoreTransactionLifecycleError.alreadyStarted
@@ -108,6 +128,8 @@ package actor StoreTransactionSession {
             source: configuration.source,
             handleTransaction: configuration.handleTransaction,
             entitlementsDidChange: configuration.entitlementsDidChange,
+            entitlementRefreshDidSucceed:
+                configuration.entitlementRefreshDidSucceed,
             reportFailure: configuration.reportFailure
         )
         state = .running(runtime)
@@ -166,7 +188,8 @@ package actor StoreTransactionSession {
     ///
     /// - Parameter productID: The StoreKit product identifier to query.
     /// - Returns: Verified snapshots ordered by purchase date, signed date, and
-    ///   transaction identifier descending, with exact JWS bytes as a final tie breaker.
+    ///   transaction identifier descending, then exact JWS UTF-8 bytes
+    ///   ascending.
     /// - Throws: A StoreKit verification or query error, a lifecycle or callback
     ///   reentrancy error, or `CancellationError` for an abandoned waiter.
     package func history(
@@ -187,7 +210,9 @@ package actor StoreTransactionSession {
     ///
     /// - Returns: The entitlement publication from a query reserved after sync succeeds.
     /// - Throws: A synchronization, verification, query, lifecycle, callback
-    ///   reentrancy, or caller cancellation error.
+    ///   reentrancy, or caller cancellation error. StoreKit may throw
+    ///   ``StoreKit/StoreKitError/userCancelled`` when the user dismisses
+    ///   authentication; callers should treat that as a normal user outcome.
     package func restorePurchases() async throws -> StoreEntitlements {
         let runtime = try runningRuntime(operation: .restorePurchases)
         guard let leases = runtime.beginOperation() else {

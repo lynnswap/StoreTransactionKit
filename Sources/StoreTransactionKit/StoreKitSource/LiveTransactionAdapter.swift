@@ -21,7 +21,8 @@ package enum LiveTransactionAdapter {
                 ))
         case .unverified(_, let error):
             return .unverified(
-                StoreTransactionVerificationError(
+                revision: Data(result.jwsRepresentation.utf8),
+                error: StoreTransactionVerificationError(
                     underlyingError: error
                 ))
         }
@@ -51,6 +52,12 @@ package enum LiveTransactionAdapter {
             productID: transaction.productID,
             subscriptionGroupID: transaction.subscriptionGroupID,
             productType: transaction.productType,
+            environment: transaction.environment,
+            offer: transaction.offer,
+            storefrontID: transaction.storefront.id,
+            storefrontCountryCode: transaction.storefront.countryCode,
+            price: transaction.price,
+            currency: transaction.currency,
             purchaseDate: transaction.purchaseDate,
             originalPurchaseDate: transaction.originalPurchaseDate,
             expirationDate: transaction.expirationDate,

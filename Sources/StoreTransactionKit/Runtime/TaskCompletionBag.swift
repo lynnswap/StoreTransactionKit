@@ -2,13 +2,18 @@ import Foundation
 import Synchronization
 
 package final class TaskCompletionBag: Sendable {
-    private let tasks = Mutex<[UUID: Task<Void, Never>]>([:])
+    private struct State {
+        var tasks: [UUID: Task<Void, Never>] = [:]
+        var emptyWaiters: [CheckedContinuation<Void, Never>] = []
+    }
+
+    private let state = Mutex(State())
 
     package init() {}
 
     package func insert(_ task: Task<Void, Never>) {
         let id = UUID()
-        tasks.withLock { $0[id] = task }
+        state.withLock { $0.tasks[id] = task }
         Task { [weak self] in
             await task.value
             self?.remove(id)
@@ -16,25 +21,39 @@ package final class TaskCompletionBag: Sendable {
     }
 
     package func waitForAll() async {
-        let snapshot = tasks.withLock { Array($0.values) }
-        for task in snapshot {
-            await task.value
+        await withCheckedContinuation { continuation in
+            let isEmpty = state.withLock { state in
+                guard !state.tasks.isEmpty else { return true }
+                state.emptyWaiters.append(continuation)
+                return false
+            }
+            if isEmpty {
+                continuation.resume()
+            }
         }
-        tasks.withLock { $0.removeAll(keepingCapacity: false) }
     }
 
     package func cancel() {
-        let snapshot = tasks.withLock { Array($0.values) }
+        let snapshot = state.withLock { Array($0.tasks.values) }
         for task in snapshot {
             task.cancel()
         }
     }
 
     package func retainedTaskCount() -> Int {
-        tasks.withLock { $0.count }
+        state.withLock { $0.tasks.count }
     }
 
     private func remove(_ id: UUID) {
-        _ = tasks.withLock { $0.removeValue(forKey: id) }
+        let waiters = state.withLock { state -> [CheckedContinuation<Void, Never>] in
+            state.tasks.removeValue(forKey: id)
+            guard state.tasks.isEmpty else { return [] }
+            let waiters = state.emptyWaiters
+            state.emptyWaiters.removeAll(keepingCapacity: false)
+            return waiters
+        }
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 }

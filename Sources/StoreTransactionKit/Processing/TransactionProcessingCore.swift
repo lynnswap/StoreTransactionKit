@@ -1,18 +1,38 @@
 import Foundation
 
+package struct ProcessingAcceptance<Value: Sendable>: Sendable {
+    package enum Role: Equatable, Sendable {
+        case owner
+        case inFlightObserver
+        case failedObserver
+        case completedObserver
+    }
+
+    package let receipt: ProcessingReceipt<Value>
+    package let role: Role
+    package let reportingAuthority: DirectOperationReportingAuthority
+}
+
 package actor TransactionProcessingCore<Value: Sendable> {
+    private struct Attempt: Sendable {
+        let receipt: ProcessingReceipt<Value>
+        let reportingAuthority: DirectOperationReportingAuthority
+    }
+
     private struct QueuedOperation: Sendable {
         let envelope: ProcessingEnvelope<Value>
-        let receipt: ProcessingReceipt<Value>
+        let attempt: Attempt
     }
 
     private let sessionID: UUID
     private let handle: @Sendable (Value) async throws -> Void
     private var queue: [QueuedOperation] = []
-    private var inFlight: [Data: ProcessingReceipt<Value>] = [:]
+    private var inFlight: [Data: Attempt] = [:]
+    private var failed: [Data: Attempt] = [:]
     private var completed = CompletedRevisionCache()
     private var worker: Task<Void, Never>?
     private var acceptsInput = true
+    private var initialAttemptCompleted = false
 
     package init(
         sessionID: UUID = UUID(),
@@ -24,22 +44,68 @@ package actor TransactionProcessingCore<Value: Sendable> {
 
     package func accept(
         _ envelope: ProcessingEnvelope<Value>
-    ) -> ProcessingReceipt<Value> {
+    ) -> ProcessingAcceptance<Value> {
         guard acceptsInput else {
-            return .failed(StoreTransactionInternalError.inputClosed)
+            return ProcessingAcceptance(
+                receipt: .failed(StoreTransactionInternalError.inputClosed),
+                role: .owner,
+                reportingAuthority: DirectOperationReportingAuthority()
+            )
         }
         if completed.contains(envelope.revision) {
-            return .succeeded(envelope.value)
+            return ProcessingAcceptance(
+                receipt: .succeeded(envelope.value),
+                role: .completedObserver,
+                reportingAuthority: DirectOperationReportingAuthority()
+            )
         }
-        if let receipt = inFlight[envelope.revision] {
-            return receipt
+        if let attempt = inFlight[envelope.revision] {
+            return ProcessingAcceptance(
+                receipt: attempt.receipt,
+                role: .inFlightObserver,
+                reportingAuthority: attempt.reportingAuthority
+            )
+        }
+        if let attempt = failed[envelope.revision] {
+            return ProcessingAcceptance(
+                receipt: attempt.receipt,
+                role: .failedObserver,
+                reportingAuthority: attempt.reportingAuthority
+            )
         }
 
-        let receipt = ProcessingReceipt<Value>()
-        inFlight[envelope.revision] = receipt
-        queue.append(QueuedOperation(envelope: envelope, receipt: receipt))
+        let attempt = Attempt(
+            receipt: ProcessingReceipt<Value>(),
+            reportingAuthority: DirectOperationReportingAuthority()
+        )
+        inFlight[envelope.revision] = attempt
+        queue.append(QueuedOperation(envelope: envelope, attempt: attempt))
         startWorkerIfNeeded()
-        return receipt
+        return ProcessingAcceptance(
+            receipt: attempt.receipt,
+            role: .owner,
+            reportingAuthority: attempt.reportingAuthority
+        )
+    }
+
+    package func retryFailedTransactionsInNewAttempt() -> Bool {
+        initialAttemptCompleted
+    }
+
+    package func beginTransactionAttempt() -> Bool {
+        guard initialAttemptCompleted else {
+            return false
+        }
+        failed.removeAll(keepingCapacity: true)
+        return true
+    }
+
+    package func beginRetryAttempt() {
+        failed.removeAll(keepingCapacity: true)
+    }
+
+    package func completeInitialAttempt() {
+        initialAttemptCompleted = true
     }
 
     package func finishInputAndDrain() async {
@@ -48,12 +114,14 @@ package actor TransactionProcessingCore<Value: Sendable> {
         await activeWorker?.value
         precondition(queue.isEmpty)
         precondition(inFlight.isEmpty)
+        failed.removeAll(keepingCapacity: false)
     }
 
     private func startWorkerIfNeeded() {
         guard worker == nil else { return }
-        worker = Task {
-            await drainQueue()
+        worker = Task.detached { [weak self] in
+            guard let self else { return }
+            await self.drainQueue()
         }
     }
 
@@ -72,10 +140,11 @@ package actor TransactionProcessingCore<Value: Sendable> {
                 await operation.envelope.finish()
                 completed.insert(operation.envelope.revision)
                 inFlight.removeValue(forKey: operation.envelope.revision)
-                operation.receipt.succeed(operation.envelope.value)
+                operation.attempt.receipt.succeed(operation.envelope.value)
             } catch {
                 inFlight.removeValue(forKey: operation.envelope.revision)
-                operation.receipt.fail(error)
+                failed[operation.envelope.revision] = operation.attempt
+                operation.attempt.receipt.fail(error)
             }
         }
         worker = nil

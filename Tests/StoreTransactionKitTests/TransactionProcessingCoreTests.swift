@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import StoreTransactionKit
 
-@Suite("TransactionProcessingCore")
+@Suite("TransactionProcessingCore", .timeLimit(.minutes(1)))
 struct TransactionProcessingCoreTests {
     @Test("durable handling precedes finish")
     func handlerPrecedesFinish() async throws {
@@ -12,16 +12,17 @@ struct TransactionProcessingCoreTests {
         let core = TransactionProcessingCore<StoreTransactionSnapshot> { _ in
             await events.append("handle-start")
             await handlerStarted.send()
-            await gate.wait()
+            try await gate.wait()
             await events.append("handle-end")
         }
         let snapshot = makeSnapshot(id: 1)
         let receipt = await core.accept(
             makeEnvelope(snapshot: snapshot) {
                 await events.append("finish")
-            })
+            }
+        ).receipt
 
-        await handlerStarted.wait(for: 1)
+        try await handlerStarted.wait(for: 1)
         #expect(await events.snapshot() == ["handle-start"])
         await gate.open()
         _ = try await receipt.terminalValue()
@@ -49,12 +50,16 @@ struct TransactionProcessingCoreTests {
 
         let first = await core.accept(envelope)
         await #expect(throws: TestFailure.self) {
-            _ = try await first.terminalValue()
+            _ = try await first.receipt.terminalValue()
         }
         #expect(await finishes.value() == 0)
 
+        await core.completeInitialAttempt()
+        #expect(await core.beginTransactionAttempt())
         let second = await core.accept(envelope)
-        _ = try await second.terminalValue()
+        _ = try await second.receipt.terminalValue()
+        #expect(first.role == .owner)
+        #expect(second.role == .owner)
         #expect(await attempts.value() == 2)
         #expect(await finishes.value() == 1)
         await core.finishInputAndDrain()
@@ -70,7 +75,7 @@ struct TransactionProcessingCoreTests {
         let core = TransactionProcessingCore<StoreTransactionSnapshot> { _ in
             await handles.send()
             await handlerStarted.send()
-            await handlerGate.wait()
+            try await handlerGate.wait()
         }
         let snapshot = makeSnapshot(id: 3)
         let first = await core.accept(
@@ -80,7 +85,7 @@ struct TransactionProcessingCoreTests {
             ) {
                 await firstFinish.send()
             })
-        await handlerStarted.wait(for: 1)
+        try await handlerStarted.wait(for: 1)
         let duplicate = await core.accept(
             makeEnvelope(
                 snapshot: snapshot,
@@ -90,8 +95,8 @@ struct TransactionProcessingCoreTests {
             })
 
         await handlerGate.open()
-        _ = try await first.terminalValue()
-        _ = try await duplicate.terminalValue()
+        _ = try await first.receipt.terminalValue()
+        _ = try await duplicate.receipt.terminalValue()
         let completed = await core.accept(
             makeEnvelope(
                 snapshot: snapshot,
@@ -99,8 +104,13 @@ struct TransactionProcessingCoreTests {
             ) {
                 await duplicateFinish.send()
             })
-        _ = try await completed.terminalValue()
+        _ = try await completed.receipt.terminalValue()
 
+        #expect(first.role == .owner)
+        #expect(duplicate.role == .inFlightObserver)
+        #expect(completed.role == .completedObserver)
+        #expect(first.reportingAuthority === duplicate.reportingAuthority)
+        #expect(first.reportingAuthority !== completed.reportingAuthority)
         #expect(await handles.value() == 1)
         #expect(await firstFinish.value() == 1)
         #expect(await duplicateFinish.value() == 0)
@@ -116,22 +126,22 @@ struct TransactionProcessingCoreTests {
             await events.append("handle-\(snapshot.id)")
             if snapshot.id == 1 {
                 await firstStarted.send()
-                await firstGate.wait()
+                try await firstGate.wait()
             }
         }
         let first = await core.accept(
             makeEnvelope(snapshot: makeSnapshot(id: 1)) {
                 await events.append("finish-1")
             })
-        await firstStarted.wait(for: 1)
+        try await firstStarted.wait(for: 1)
         let second = await core.accept(
             makeEnvelope(snapshot: makeSnapshot(id: 2)) {
                 await events.append("finish-2")
             })
 
         await firstGate.open()
-        _ = try await first.terminalValue()
-        _ = try await second.terminalValue()
+        _ = try await first.receipt.terminalValue()
+        _ = try await second.receipt.terminalValue()
         #expect(
             await events.snapshot() == [
                 "handle-1", "finish-1", "handle-2", "finish-2",

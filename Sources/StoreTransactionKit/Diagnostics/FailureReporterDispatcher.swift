@@ -53,8 +53,9 @@ package actor FailureReporterDispatcher {
 
     private func startWorkerIfNeeded() {
         guard worker == nil else { return }
-        worker = Task {
-            await drainQueue()
+        worker = Task.detached { [weak self] in
+            guard let self else { return }
+            await self.drainQueue()
         }
     }
 

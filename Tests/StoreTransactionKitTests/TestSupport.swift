@@ -5,48 +5,89 @@ import Testing
 @testable import StoreTransactionKit
 
 actor TestSignal {
+    private struct Waiter {
+        let target: Int
+        let continuation: CheckedContinuation<Void, any Error>
+    }
+
     private var count = 0
-    private var waiters: [(target: Int, continuation: CheckedContinuation<Void, Never>)] = []
+    private var waiters: [UUID: Waiter] = [:]
 
     func send() {
         count += 1
-        let ready = waiters.filter { $0.target <= count }
-        waiters.removeAll { $0.target <= count }
-        for waiter in ready {
-            waiter.continuation.resume()
+        let ready = waiters.compactMap { id, waiter in
+            waiter.target <= count ? id : nil
+        }
+        for id in ready {
+            waiters.removeValue(forKey: id)?.continuation.resume()
         }
     }
 
-    func wait(for target: Int) async {
+    func wait(for target: Int) async throws {
         guard count < target else { return }
-        await withCheckedContinuation { continuation in
-            waiters.append((target, continuation))
+        try Task.checkCancellation()
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if count >= target {
+                    continuation.resume()
+                } else {
+                    waiters[id] = Waiter(
+                        target: target,
+                        continuation: continuation
+                    )
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
         }
     }
 
     func value() -> Int {
         count
     }
+
+    private func cancelWaiter(_ id: UUID) {
+        waiters.removeValue(forKey: id)?.continuation.resume(
+            throwing: CancellationError()
+        )
+    }
 }
 
 actor TestGate {
     private var isOpen = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
 
-    func wait() async {
+    func wait() async throws {
         guard !isOpen else { return }
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
+        try Task.checkCancellation()
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if isOpen {
+                    continuation.resume()
+                } else {
+                    waiters[id] = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
         }
     }
 
     func open() {
         isOpen = true
-        let pending = waiters
+        let pending = Array(waiters.values)
         waiters.removeAll(keepingCapacity: false)
         for waiter in pending {
             waiter.resume()
         }
+    }
+
+    private func cancelWaiter(_ id: UUID) {
+        waiters.removeValue(forKey: id)?.resume(
+            throwing: CancellationError()
+        )
     }
 }
 
@@ -94,24 +135,24 @@ final class SessionHolder: Sendable {
     }
 }
 
-final class StoreHolder<EntitlementID>: Sendable
+final class TransactionStoreHolder<EntitlementID>: Sendable
 where
     EntitlementID: RawRepresentable & Hashable & Sendable,
     EntitlementID.RawValue == String
 {
-    private let storage = Mutex<Store<EntitlementID>?>(nil)
+    private let storage = Mutex<TransactionStore<EntitlementID>?>(nil)
 
-    func set(_ store: Store<EntitlementID>) {
+    func set(_ store: TransactionStore<EntitlementID>) {
         storage.withLock { value in
             precondition(value == nil)
             value = store
         }
     }
 
-    func get() -> Store<EntitlementID> {
+    func get() -> TransactionStore<EntitlementID> {
         storage.withLock { value in
             guard let value else {
-                preconditionFailure("StoreHolder was read before initialization.")
+                preconditionFailure("TransactionStoreHolder was read before initialization.")
             }
             return value
         }
@@ -119,28 +160,48 @@ where
 }
 
 actor ControlledEntitlementQuery {
-    private var requests: [CheckedContinuation<[StoreTransactionSnapshot], any Error>] = []
+    private struct Request {
+        let id: UUID
+        let continuation: CheckedContinuation<[StoreTransactionSnapshot], any Error>
+    }
+
+    private var requests: [Request] = []
     private let started = TestSignal()
 
     func next() async throws -> [StoreTransactionSnapshot] {
-        await started.send()
-        return try await withCheckedThrowingContinuation { continuation in
-            requests.append(continuation)
+        try Task.checkCancellation()
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                requests.append(Request(id: id, continuation: continuation))
+                Task { await started.send() }
+            }
+        } onCancel: {
+            Task { await self.cancelRequest(id) }
         }
     }
 
-    func waitForRequest(_ count: Int) async {
-        await started.wait(for: count)
+    func waitForRequest(_ count: Int) async throws {
+        try await started.wait(for: count)
     }
 
     func succeed(_ snapshots: [StoreTransactionSnapshot]) {
         precondition(!requests.isEmpty)
-        requests.removeFirst().resume(returning: snapshots)
+        requests.removeFirst().continuation.resume(returning: snapshots)
     }
 
     func fail(_ error: any Error) {
         precondition(!requests.isEmpty)
-        requests.removeFirst().resume(throwing: error)
+        requests.removeFirst().continuation.resume(throwing: error)
+    }
+
+    private func cancelRequest(_ id: UUID) {
+        guard let index = requests.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        requests.remove(at: index).continuation.resume(
+            throwing: CancellationError()
+        )
     }
 }
 
@@ -160,13 +221,31 @@ actor EntitlementValueSource {
     }
 }
 
+actor UnfinishedValueSource {
+    private var value: [StoreTransactionDelivery]
+
+    init(_ value: [StoreTransactionDelivery] = []) {
+        self.value = value
+    }
+
+    func read() -> [StoreTransactionDelivery] {
+        value
+    }
+
+    func replace(with value: [StoreTransactionDelivery]) {
+        self.value = value
+    }
+}
+
 func makeSnapshot(
     id: UInt64,
     productID: String = "product",
+    productType: Product.ProductType = .consumable,
     purchaseDate: Date? = nil,
     signedDate: Date? = nil,
     jws: String? = nil,
-    revocationDate: Date? = nil
+    revocationDate: Date? = nil,
+    isUpgraded: Bool = false
 ) -> StoreTransactionSnapshot {
     let purchaseDate = purchaseDate ?? Date(timeIntervalSince1970: TimeInterval(id))
     return StoreTransactionSnapshot(
@@ -174,14 +253,20 @@ func makeSnapshot(
         originalID: id,
         productID: productID,
         subscriptionGroupID: nil,
-        productType: .consumable,
+        productType: productType,
+        environment: .xcode,
+        offer: nil,
+        storefrontID: "143441",
+        storefrontCountryCode: "USA",
+        price: nil,
+        currency: nil,
         purchaseDate: purchaseDate,
         originalPurchaseDate: purchaseDate,
         expirationDate: nil,
         revocationDate: revocationDate,
         revocationReason: nil,
         purchasedQuantity: 1,
-        isUpgraded: false,
+        isUpgraded: isUpgraded,
         ownershipType: .purchased,
         reason: .purchase,
         appAccountToken: nil,
@@ -207,29 +292,44 @@ struct TestFailure: Error, Sendable, Equatable {}
 struct TestSourceFixture: Sendable {
     let source: StoreTransactionSource
     let updates: AsyncStream<StoreTransactionDelivery>.Continuation
-    let unfinished: AsyncStream<StoreTransactionDelivery>.Continuation
+    let subscriptionStatusUpdates: AsyncStream<Void>.Continuation
     let updateTermination: TestSignal
+    let subscriptionStatusDeliveryCount: TestSignal
+    let subscriptionStatusTermination: TestSignal
     let entitlementQueryCount: TestSignal
 
     init(
         currentEntitlements:
             @escaping @Sendable () async throws
             -> [StoreTransactionSnapshot] = { [] },
+        currentEntitlementVerificationFailures:
+            @escaping @Sendable () async
+            -> [StoreTransactionVerificationError] = { [] },
+        queryUnfinished:
+            @escaping @Sendable () async
+            -> [StoreTransactionDelivery] = { [] },
         history:
             @escaping @Sendable (Product.ID) async throws
             -> [StoreTransactionSnapshot] = { _ in [] },
         synchronize: @escaping @Sendable () async throws -> Void = {}
     ) {
         let updatePair = AsyncStream<StoreTransactionDelivery>.makeStream()
-        let unfinishedPair = AsyncStream<StoreTransactionDelivery>.makeStream()
+        let subscriptionStatusPair = AsyncStream<Void>.makeStream()
         let updateTermination = TestSignal()
+        let subscriptionStatusDeliveryCount = TestSignal()
+        let subscriptionStatusTermination = TestSignal()
         let entitlementQueryCount = TestSignal()
         updatePair.continuation.onTermination = { _ in
             Task { await updateTermination.send() }
         }
+        subscriptionStatusPair.continuation.onTermination = { _ in
+            Task { await subscriptionStatusTermination.send() }
+        }
         self.updates = updatePair.continuation
-        self.unfinished = unfinishedPair.continuation
+        self.subscriptionStatusUpdates = subscriptionStatusPair.continuation
         self.updateTermination = updateTermination
+        self.subscriptionStatusDeliveryCount = subscriptionStatusDeliveryCount
+        self.subscriptionStatusTermination = subscriptionStatusTermination
         self.entitlementQueryCount = entitlementQueryCount
         self.source = StoreTransactionSource(
             runUpdates: { consume in
@@ -237,15 +337,21 @@ struct TestSourceFixture: Sendable {
                     await consume(delivery)
                 }
             },
-            runUnfinished: { consume in
-                for await delivery in unfinishedPair.stream {
-                    await consume(delivery)
+            runSubscriptionStatusUpdates: { consume in
+                for await _ in subscriptionStatusPair.stream {
+                    await subscriptionStatusDeliveryCount.send()
+                    await consume()
                 }
             },
             currentEntitlements: {
                 await entitlementQueryCount.send()
-                return try await currentEntitlements()
+                return CurrentEntitlementQueryResult(
+                    snapshots: try await currentEntitlements(),
+                    verificationFailures:
+                        await currentEntitlementVerificationFailures()
+                )
             },
+            queryUnfinished: queryUnfinished,
             history: history,
             synchronize: synchronize,
             purchaseDelivery: { result in

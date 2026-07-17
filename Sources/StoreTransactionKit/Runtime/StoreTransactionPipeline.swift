@@ -17,12 +17,18 @@ package final class StoreTransactionPipeline: Sendable {
         _ delivery: StoreTransactionDelivery
     ) async throws -> (
         snapshot: StoreTransactionSnapshot,
-        receipt: ProcessingReceipt<StoreTransactionSnapshot>
+        acceptance: ProcessingAcceptance<StoreTransactionSnapshot>,
+        retryFailedTransactions: Bool
     ) {
         switch delivery {
         case .verified(let envelope):
-            return (envelope.value, await core.accept(envelope))
-        case .unverified(let error):
+            let retryFailedTransactions = await core.beginTransactionAttempt()
+            return (
+                envelope.value,
+                await core.accept(envelope),
+                retryFailedTransactions
+            )
+        case .unverified(_, let error):
             throw error
         }
     }
@@ -32,11 +38,13 @@ package final class StoreTransactionPipeline: Sendable {
         source: StoreTransactionBackgroundFailure.Source
     ) async {
         let snapshot: StoreTransactionSnapshot?
-        let receipt: ProcessingReceipt<StoreTransactionSnapshot>
+        let acceptance: ProcessingAcceptance<StoreTransactionSnapshot>
+        let retryFailedTransactions: Bool
         do {
             let accepted = try await accept(delivery)
             snapshot = accepted.snapshot
-            receipt = accepted.receipt
+            acceptance = accepted.acceptance
+            retryFailedTransactions = accepted.retryFailedTransactions
         } catch {
             await failures.enqueue(
                 StoreTransactionBackgroundFailure(
@@ -48,9 +56,24 @@ package final class StoreTransactionPipeline: Sendable {
             return
         }
 
+        await processAcceptedBackground(
+            snapshot: snapshot,
+            acceptance: acceptance,
+            retryFailedTransactions: retryFailedTransactions,
+            source: source
+        )
+    }
+
+    package func processAcceptedBackground(
+        snapshot: StoreTransactionSnapshot?,
+        acceptance: ProcessingAcceptance<StoreTransactionSnapshot>,
+        retryFailedTransactions: Bool = true,
+        source: StoreTransactionBackgroundFailure.Source
+    ) async {
         do {
-            _ = try await receipt.terminalValue()
+            _ = try await acceptance.receipt.terminalValue()
         } catch {
+            guard case .owner = acceptance.role else { return }
             await failures.enqueue(
                 StoreTransactionBackgroundFailure(
                     source: source,
@@ -61,36 +84,46 @@ package final class StoreTransactionPipeline: Sendable {
             return
         }
 
+        if case .inFlightObserver = acceptance.role {
+            return
+        }
+        let refresh = await entitlements.reserve(
+            retryFailedTransactions: retryFailedTransactions
+        )
         do {
-            let refresh = await entitlements.reserve()
-            _ = try await refresh.terminalValue()
+            _ = try await refresh.receipt.terminalValue()
         } catch {
+            let propagation = StoreTransactionFailurePropagation(error)
+            guard !propagation.hasReportingOwner else { return }
+            guard refresh.role == .owner else { return }
             await failures.enqueue(
                 StoreTransactionBackgroundFailure(
                     source: .entitlementRefresh,
                     transactionID: snapshot?.id,
                     productID: snapshot?.productID,
-                    underlyingError: error
+                    underlyingError: propagation.underlyingError
                 ))
         }
     }
 
-    package func reportAbandoned(
-        operation: StoreTransactionOperation,
-        snapshot: StoreTransactionSnapshot?,
-        receipt: ProcessingReceipt<StoreTransactionSnapshot>
-    ) async {
+    package func refreshEntitlements() async {
+        let retryFailedTransactions =
+            await core.retryFailedTransactionsInNewAttempt()
+        let refresh = await entitlements.reserve(
+            retryFailedTransactions: retryFailedTransactions
+        )
         do {
-            _ = try await receipt.terminalValue()
-            let refresh = await entitlements.reserve()
-            _ = try await refresh.terminalValue()
+            _ = try await refresh.receipt.terminalValue()
         } catch {
+            let propagation = StoreTransactionFailurePropagation(error)
+            guard !propagation.hasReportingOwner else { return }
+            guard refresh.role == .owner else { return }
             await failures.enqueue(
                 StoreTransactionBackgroundFailure(
-                    source: .abandonedDirectOperation(operation),
-                    transactionID: snapshot?.id,
-                    productID: snapshot?.productID,
-                    underlyingError: error
+                    source: .entitlementRefresh,
+                    transactionID: nil,
+                    productID: nil,
+                    underlyingError: propagation.underlyingError
                 ))
         }
     }

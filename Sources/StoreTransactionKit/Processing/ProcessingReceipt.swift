@@ -1,11 +1,86 @@
 import Foundation
 import Synchronization
 
+package struct ProcessingReceiptWaiterCancellation: Error {}
+
 package final class ProcessingReceipt<Value: Sendable>: Sendable {
     private typealias ReceiptResult = Result<Value, any Error>
 
+    private final class Waiter: Sendable {
+        private enum State {
+            case idle
+            case waiting(CheckedContinuation<ReceiptResult, Never>)
+            case cancelled
+            case terminal(ReceiptResult)
+        }
+
+        private let state = Mutex<State>(.idle)
+
+        func value() async -> ReceiptResult {
+            await withCheckedContinuation { continuation in
+                let immediate = state.withLock { state -> ReceiptResult? in
+                    switch state {
+                    case .idle:
+                        state = .waiting(continuation)
+                        return nil
+                    case .cancelled:
+                        return .failure(ProcessingReceiptWaiterCancellation())
+                    case .terminal(let result):
+                        return result
+                    case .waiting:
+                        preconditionFailure("A processing receipt waiter was awaited more than once.")
+                    }
+                }
+                if let immediate {
+                    continuation.resume(returning: immediate)
+                }
+            }
+        }
+
+        func cancel() {
+            let continuation = state.withLock { state -> CheckedContinuation<ReceiptResult, Never>? in
+                switch state {
+                case .idle:
+                    state = .cancelled
+                    return nil
+                case .waiting(let continuation):
+                    state = .cancelled
+                    return continuation
+                case .cancelled, .terminal:
+                    return nil
+                }
+            }
+            continuation?.resume(
+                returning: .failure(ProcessingReceiptWaiterCancellation())
+            )
+        }
+
+        func complete(_ result: ReceiptResult) {
+            let continuation = state.withLock { state -> CheckedContinuation<ReceiptResult, Never>? in
+                switch state {
+                case .idle:
+                    state = .terminal(result)
+                    return nil
+                case .waiting(let continuation):
+                    state = .terminal(result)
+                    return continuation
+                case .cancelled:
+                    return nil
+                case .terminal:
+                    preconditionFailure("A processing receipt waiter completed more than once.")
+                }
+            }
+            continuation?.resume(returning: result)
+        }
+    }
+
     private enum State {
-        case pending([UUID: CheckedContinuation<ReceiptResult, Never>])
+        case pending([UUID: Waiter])
+        case terminal(ReceiptResult)
+    }
+
+    private enum Registration {
+        case waiter(id: UUID, waiter: Waiter)
         case terminal(ReceiptResult)
     }
 
@@ -26,61 +101,31 @@ package final class ProcessingReceipt<Value: Sendable>: Sendable {
     }
 
     package func value() async throws -> Value {
-        let waiterID = UUID()
-        let cancellation = Mutex(false)
-
-        let result = await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                let wasCancelled = cancellation.withLock { $0 }
-                let immediate = state.withLock { state -> ReceiptResult? in
-                    if wasCancelled {
-                        return .failure(CancellationError())
-                    }
-                    switch state {
-                    case .pending(var waiters):
-                        waiters[waiterID] = continuation
-                        state = .pending(waiters)
-                        return nil
-                    case .terminal(let result):
-                        return result
-                    }
-                }
-                if let immediate {
-                    continuation.resume(returning: immediate)
-                }
-            }
-        } onCancel: {
-            cancellation.withLock { $0 = true }
-            let continuation = state.withLock { state -> CheckedContinuation<ReceiptResult, Never>? in
-                guard case .pending(var waiters) = state else { return nil }
-                let continuation = waiters.removeValue(forKey: waiterID)
-                state = .pending(waiters)
-                return continuation
-            }
-            continuation?.resume(returning: .failure(CancellationError()))
+        guard !Task.isCancelled else {
+            throw ProcessingReceiptWaiterCancellation()
         }
 
-        return try result.get()
+        switch registerWaiter() {
+        case .terminal(let result):
+            return try result.get()
+        case .waiter(let id, let waiter):
+            let result = await withTaskCancellationHandler {
+                await waiter.value()
+            } onCancel: {
+                waiter.cancel()
+                self.removeWaiter(id)
+            }
+            return try result.get()
+        }
     }
 
     package func terminalValue() async throws -> Value {
-        let result = await withCheckedContinuation { continuation in
-            let waiterID = UUID()
-            let immediate = state.withLock { state -> ReceiptResult? in
-                switch state {
-                case .pending(var waiters):
-                    waiters[waiterID] = continuation
-                    state = .pending(waiters)
-                    return nil
-                case .terminal(let result):
-                    return result
-                }
-            }
-            if let immediate {
-                continuation.resume(returning: immediate)
-            }
+        switch registerWaiter() {
+        case .terminal(let result):
+            return try result.get()
+        case .waiter(_, let waiter):
+            return try await waiter.value().get()
         }
-        return try result.get()
     }
 
     package func succeed(_ value: Value) {
@@ -92,15 +137,38 @@ package final class ProcessingReceipt<Value: Sendable>: Sendable {
     }
 
     private func complete(_ result: ReceiptResult) {
-        let continuations = state.withLock { state -> [CheckedContinuation<ReceiptResult, Never>] in
+        let waiters = state.withLock { state -> [Waiter] in
             guard case .pending(let waiters) = state else {
                 preconditionFailure("A processing receipt completed more than once.")
             }
             state = .terminal(result)
             return Array(waiters.values)
         }
-        for continuation in continuations {
-            continuation.resume(returning: result)
+        for waiter in waiters {
+            waiter.complete(result)
+        }
+    }
+
+    private func registerWaiter() -> Registration {
+        state.withLock { state in
+            switch state {
+            case .pending(var waiters):
+                let id = UUID()
+                let waiter = Waiter()
+                waiters[id] = waiter
+                state = .pending(waiters)
+                return .waiter(id: id, waiter: waiter)
+            case .terminal(let result):
+                return .terminal(result)
+            }
+        }
+    }
+
+    private func removeWaiter(_ id: UUID) {
+        state.withLock { state in
+            guard case .pending(var waiters) = state else { return }
+            waiters.removeValue(forKey: id)
+            state = .pending(waiters)
         }
     }
 }
