@@ -20,10 +20,11 @@ The store owns the durable transaction path for the process lifetime:
 
 - Monitoring: `Transaction.updates`, `Transaction.unfinished` reconciliation,
   and subscription status changes
-- Verification: only verified transactions reach your code; unverified
-  deliveries surface as thrown errors or reported failures
-- Ordering: durable handling first, then `finish()`, with at-least-once
-  delivery to an idempotent handler and exact-revision deduplication
+- Verification: only verified transactions reach policy code; direct failures
+  throw, and an optional delegate can receive background failures
+- Ordering: verification, an optional app policy decision, then `finish()` only
+  when permitted. Finished revisions are deduplicated for the process lifetime,
+  while unfinished decisions are coalesced only through their causal attempt.
 - State: the observable current-entitlement projection, restore
   synchronization, background failure delivery, and explicit shutdown
 
@@ -31,7 +32,7 @@ Your app owns everything the user sees and everything it persists:
 
 - Paywall and purchase UI (StoreKit views or the platform-appropriate
   StoreKit purchase action)
-- The durable ledger that the transaction handler writes to
+- Any app-specific durable ledger used by a transaction delegate
 - Subscription status presentation (`Product.SubscriptionInfo.Status`)
 - Purchases that begin outside the app on platforms that provide
   `PurchaseIntent.intents`
@@ -75,53 +76,12 @@ enum Plans: SubscriptionGroup {
 }
 
 let subscriptionCatalog = SubscriptionCatalog(Plans.self)
-
-actor PurchaseLedger {
-    func apply(_ transaction: StoreTransactionSnapshot) async throws {
-        if let revocationDate = transaction.revocationDate {
-            try await database.revokePurchase(
-                transactionID: transaction.id,
-                productID: transaction.productID,
-                signedDate: transaction.signedDate,
-                revocationDate: revocationDate
-            )
-        } else {
-            try await database.commitPurchase(
-                transactionID: transaction.id,
-                productID: transaction.productID,
-                signedDate: transaction.signedDate
-            )
-        }
-    }
-}
-
-actor StoreDiagnostics {
-    func record(_ failure: StoreTransactionBackgroundFailure) {
-        logger.error("StoreKit background failure: \(failure.underlyingError)")
-    }
-}
-
-@MainActor
-func makeStore(
-    ledger: PurchaseLedger,
-    diagnostics: StoreDiagnostics
-) -> TransactionStore<SubscriptionEntitlement> {
-    TransactionStore(
-        subscriptionCatalog: subscriptionCatalog,
-        handleTransaction: { transaction in
-            try await ledger.apply(transaction)
-        },
-        reportFailure: { failure in
-            await diagnostics.record(failure)
-        }
-    )
-}
 ```
 
 `TransactionStore` is `@MainActor` and `@Observable`. It starts monitoring
-during initialization. Create the app-owned dependencies once at the
-process-lifetime composition root, retain one store with SwiftUI state, and
-inject that same instance into the environment:
+during initialization. Create one store at the process-lifetime composition
+root, retain it with SwiftUI state, and inject that same instance into the
+environment:
 
 ```swift
 import StoreTransactionKit
@@ -132,12 +92,9 @@ struct ExampleApp: App {
     @State private var store: TransactionStore<SubscriptionEntitlement>
 
     init() {
-        let ledger = PurchaseLedger()
-        let diagnostics = StoreDiagnostics()
         _store = State(
-            initialValue: makeStore(
-                ledger: ledger,
-                diagnostics: diagnostics
+            initialValue: TransactionStore(
+                subscriptionCatalog: subscriptionCatalog
             )
         )
     }
@@ -215,67 +172,113 @@ monitors. If you add a non-`nil` completion action, it replaces that default
 *and* StoreKit's failure alert — pass each `.success` value to
 `store.process(_:)` and own `.failure` presentation yourself.
 
-## The callback contracts
+## Override entitlements
 
-`handleTransaction` owns the app's durable transaction correctness:
+For previews, internal builds, or other app-defined environments that should
+bypass StoreKit, provide the exact app entitlements to enable:
+
+```swift
+let store = TransactionStore(
+    subscriptionCatalog: subscriptionCatalog,
+    overridingEntitlements: [
+        SubscriptionEntitlement.tier1,
+        .tier2,
+    ]
+)
+```
+
+## Transaction delegate
+
+Without a delegate, the store uses its built-in `.finish` policy for verified
+transactions. Supply a delegate when the app must apply its own durable effect
+or receive background failure notifications:
+
+```swift
+final class AppTransactionDelegate: TransactionStoreDelegate {
+    func transactionStore(
+        decidePolicyFor transaction: StoreTransactionSnapshot
+    ) async throws -> StoreTransactionHandlingPolicy {
+        try await persist(transaction)
+        return .finish
+    }
+
+    func transactionStore(
+        didFailWith failure: StoreTransactionBackgroundFailure
+    ) async {
+        await record(failure)
+    }
+}
+
+let store = TransactionStore(
+    subscriptionCatalog: subscriptionCatalog,
+    delegate: AppTransactionDelegate()
+)
+```
+
+`transactionStore(decidePolicyFor:)` owns the app's durable transaction
+correctness:
 
 - **Be idempotent.** Delivery is at least once; key the ledger on transaction
   identity plus the business event it applies.
 - **Treat purchase and revocation as distinct events.** A refund or
   family-sharing revocation arrives as the same transaction with
   `revocationDate` set; transaction ID alone is not a sufficient key.
-- **Return only after the business effect is durable.** The store calls
-  `finish()` after the handler returns. Throwing keeps the transaction
-  unfinished, and a later refresh retries it.
-- **Never call back into the same store** from `handleTransaction` or
-  `reportFailure`, even through an awaited detached task — doing so creates a
-  dependency cycle with the work being handled.
+- **Return `.finish` only after the business effect is durable.** The store then
+  calls `finish()`. Return `.keepUnfinished` only after deliberately choosing
+  to leave the transaction eligible for a later attempt; throw when neither
+  decision can be completed.
+- **Never call back into the same store** from either delegate method, even
+  through an awaited detached task — doing so creates a dependency cycle with
+  the work being handled.
 
-`reportFailure` is also a liveness boundary. StoreTransactionKit delivers
-admitted failures serially with backpressure and waits for each callback to
-return; `close()` waits for those callbacks too. Record or enqueue the failure
-promptly instead of performing work that can wait indefinitely.
+`transactionStore(didFailWith:)` is an optional notification with a default
+no-op implementation. Its return cannot change the transaction decision.
 
-Both callback contracts are documented on `TransactionStore.init`.
+The full decision, redelivery, and failure-routing contracts are documented in
+the [API design](Docs/SubscriptionCatalogAPI.md).
 
 ## How entitlement availability behaves
 
-- `entitlementStatus` is `.loading` before the first readiness result,
+- A live store reports `.loading` before the first readiness result,
   `.failed(error)` when no usable catalog projection is available, and `.ready`
-  when raw and typed entitlement state is available.
+  when raw and typed entitlement state is available. A store created with
+  `overridingEntitlements` reports `.overridden` immediately.
 - `activeEntitlements` is `nil` while `entitlementStatus` is `.loading` or
-  `.failed`. When the status is `.ready`, an empty set means no catalog
-  entitlement is active.
+  `.failed`. It is non-`nil` for `.ready` and `.overridden`; an empty set means
+  no app entitlement is active.
+- `entitlements` contains a verified StoreKit snapshot only for `.ready`. It is
+  `nil` in override mode because an override does not invent StoreKit
+  transactions.
 - Gate paid features with `isEntitled(to:)` without blocking the surrounding UI.
-  Consult `entitlementStatus` only when the app needs to explain why the
-  entitlement set is unavailable.
+  The query checks exact set membership in both `.ready` and `.overridden`.
+  Consult `entitlementStatus` only when the app needs to explain where the
+  entitlement set came from or why it is unavailable.
 - A successful refresh after `.failed` publishes `.ready` and the new active
-  entitlement set. A background query or transaction-handler failure after
-  `.ready` preserves the last active set and reports the failure through
-  `reportFailure`.
+  entitlement set. A background query or thrown delegate error after `.ready`
+  preserves the last active set and reports the failure through
+  `transactionStore(didFailWith:)`.
 - A verified catalog mismatch fails closed: it changes the status to `.failed`
   and clears both entitlement projections instead of preserving stale access.
 - Startup and every refresh reconcile `Transaction.unfinished` — including
-  consumables — before publishing state. A handler failure fails that refresh;
-  the next refresh retries the unfinished work.
+  consumables — before publishing state. A thrown delegate error fails that
+  refresh; the next refresh retries the unfinished work.
 - Transactions superseded by a subscription upgrade stay in `entitlements` but
   don't appear in `activeEntitlements`.
 - Unverified current-entitlement elements are omitted and reported to
-  `reportFailure` with source `.currentEntitlementVerification`.
+  `transactionStore(didFailWith:)` with source
+  `.currentEntitlementVerification`.
 - Product IDs mapped to the same app entitlement appear as the same typed value.
 - `SubscriptionCatalog` maps auto-renewable subscriptions only. Other product
   types don't belong to subscription groups; consumables remain part of
   transaction handling and never appear in current entitlements.
-
-For the full delivery, reconciliation, and failure-reporting model, see
-[Understanding transaction handling][understanding].
 
 ## Beyond the basics
 
 - **Custom purchase UI** — load products and start the purchase with StoreKit
   views, SwiftUI's `PurchaseAction`, or the platform-appropriate `Product`
   purchase API. Pass the resulting `Product.PurchaseResult` to
-  `store.process(_:)`; `.pending` outcomes arrive later through the handler.
+  `store.process(_:)`; after `.pending`, a later completion may arrive through
+  transaction monitoring and the delegate decision path.
 - **Restore** — call `store.restorePurchases()` only from an explicit user
   action; `AppStore.sync()` presents authentication UI, and
   `StoreKitError.userCancelled` is a normal outcome, not a diagnostic failure.
@@ -296,20 +299,53 @@ explains which purchase entry point to use for each UI framework and platform.
 
 ## API design
 
-See [Subscription catalog API design](Docs/SubscriptionCatalogAPI.md) for the
+See [StoreTransactionKit API design](Docs/SubscriptionCatalogAPI.md) for the
 proposed public interface, validation rules, ownership boundaries, and state
 transition contract behind the Quick start.
 
 ## Testing
 
-The app-hosted StoreKit integration suite runs with `xcodebuild`. See
-[Tools/TestApp/README.md](Tools/TestApp/README.md) for the scenarios and
-command.
+App and ViewModel tests can use `StoreTransactionKitTesting` without creating a
+`.storekit` configuration:
+
+```swift
+import StoreTransactionKitTesting
+import Testing
+
+@Test
+@MainActor
+func subscriptionUpdatesViewModel() async throws {
+    let harness = try await TransactionStoreTestHarness(
+        subscriptionCatalog: subscriptionCatalog
+    )
+    let viewModel = NotesViewModel(store: harness.store)
+
+    #expect(!viewModel.canExportPDF)
+
+    try await harness.purchase(
+        .tier1_Monthly,
+        in: Plans.self
+    )
+
+    #expect(viewModel.canExportPDF)
+
+    try await harness.close()
+}
+```
+
+`purchase(_:,in:)` returns after the policy decision, reconciliation, catalog
+projection, and the `@MainActor` store publication it caused, so this test does
+not need a Clock. Time-driven scenarios inject `TransactionStoreTestClock` into
+the app component that owns the delay or deadline.
+
+The harness tests app state and the StoreTransactionKit pipeline. The separate
+app-hosted StoreKit integration suite continues to test the live StoreKit
+adapter with `xcodebuild` and a shared configuration. See
+[Tools/TestApp/README.md](Tools/TestApp/README.md) for its scenarios and command.
 
 ## License
 
 StoreTransactionKit is available under the MIT License.
 
-[understanding]: https://lynnswap.github.io/StoreTransactionKit/documentation/storetransactionkit/understandingtransactionhandling
 [subscription-setup]: https://developer.apple.com/help/app-store-connect/manage-subscriptions/offer-auto-renewable-subscriptions
 [storekit-testing]: https://developer.apple.com/documentation/xcode/setting-up-storekit-testing-in-xcode
