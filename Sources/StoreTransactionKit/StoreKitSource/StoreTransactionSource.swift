@@ -1,8 +1,9 @@
+import Foundation
 import StoreKit
 
 package enum StoreTransactionDelivery: Sendable {
     case verified(ProcessingEnvelope<StoreTransactionSnapshot>)
-    case unverified(any Error)
+    case unverified(revision: Data, error: any Error)
 }
 
 package struct CurrentEntitlementQueryResult: Sendable {

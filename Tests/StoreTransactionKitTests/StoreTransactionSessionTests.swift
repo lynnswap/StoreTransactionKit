@@ -740,7 +740,11 @@ struct StoreTransactionSessionTests {
                     await finished.send()
                 }))
         try await finished.wait(for: 1)
-        fixture.updates.yield(.unverified(TestFailure()))
+        fixture.updates.yield(
+            .unverified(
+                revision: Data("update-verification-failure".utf8),
+                error: TestFailure()
+            ))
         try await failureReported.wait(for: 1)
 
         #expect(

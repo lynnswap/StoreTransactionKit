@@ -28,7 +28,7 @@ package final class StoreTransactionPipeline: Sendable {
                 await core.accept(envelope),
                 retryFailedTransactions
             )
-        case .unverified(let error):
+        case .unverified(_, let error):
             throw error
         }
     }

@@ -18,7 +18,12 @@ package final class CurrentEntitlementReconciler: Sendable {
     private struct UnfinishedBatch: Sendable {
         let revisions: Set<Data>
         let acceptedTransactions: [AcceptedTransaction]
-        let verificationFailures: [any Error]
+        let verificationFailures: [UnfinishedVerificationFailure]
+    }
+
+    private struct UnfinishedVerificationFailure: Sendable {
+        let revision: Data
+        let error: any Error
     }
 
     private let currentEntitlements: @Sendable () async throws -> CurrentEntitlementQueryResult
@@ -51,6 +56,13 @@ package final class CurrentEntitlementReconciler: Sendable {
         var batch = await unfinishedBatch(
             excluding: reconciledRevisions
         )
+        var observedUnfinishedVerificationRevisions: Set<Data> = []
+        var observedUnfinishedVerificationFailures: [any Error] = []
+        collectUnfinishedVerificationFailures(
+            batch.verificationFailures,
+            observedRevisions: &observedUnfinishedVerificationRevisions,
+            observedFailures: &observedUnfinishedVerificationFailures
+        )
         var precedingCurrentVerificationFailures: [StoreTransactionVerificationError] = []
 
         while true {
@@ -59,7 +71,7 @@ package final class CurrentEntitlementReconciler: Sendable {
                     try await drain(batch.acceptedTransactions)
                 } catch {
                     await reportVerificationFailures(
-                        unfinished: batch.verificationFailures,
+                        unfinished: observedUnfinishedVerificationFailures,
                         currentEntitlements:
                             precedingCurrentVerificationFailures
                     )
@@ -69,6 +81,13 @@ package final class CurrentEntitlementReconciler: Sendable {
                 batch = await unfinishedBatch(
                     excluding: reconciledRevisions
                 )
+                collectUnfinishedVerificationFailures(
+                    batch.verificationFailures,
+                    observedRevisions:
+                        &observedUnfinishedVerificationRevisions,
+                    observedFailures:
+                        &observedUnfinishedVerificationFailures
+                )
             }
 
             let result: CurrentEntitlementQueryResult
@@ -76,7 +95,7 @@ package final class CurrentEntitlementReconciler: Sendable {
                 result = try await currentEntitlements()
             } catch {
                 await reportUnfinishedVerificationFailures(
-                    batch.verificationFailures
+                    observedUnfinishedVerificationFailures
                 )
                 throw error
             }
@@ -84,9 +103,16 @@ package final class CurrentEntitlementReconciler: Sendable {
             let postQueryBatch = await unfinishedBatch(
                 excluding: reconciledRevisions
             )
+            collectUnfinishedVerificationFailures(
+                postQueryBatch.verificationFailures,
+                observedRevisions:
+                    &observedUnfinishedVerificationRevisions,
+                observedFailures:
+                    &observedUnfinishedVerificationFailures
+            )
             guard !postQueryBatch.acceptedTransactions.isEmpty else {
                 await reportVerificationFailures(
-                    unfinished: postQueryBatch.verificationFailures,
+                    unfinished: observedUnfinishedVerificationFailures,
                     currentEntitlements: result.verificationFailures
                 )
                 return result.snapshots
@@ -102,7 +128,7 @@ package final class CurrentEntitlementReconciler: Sendable {
     ) async -> UnfinishedBatch {
         var revisions: Set<Data> = []
         var acceptedTransactions: [AcceptedTransaction] = []
-        var verificationFailures: [any Error] = []
+        var verificationFailures: [UnfinishedVerificationFailure] = []
 
         for delivery in await queryUnfinished() {
             switch delivery {
@@ -118,8 +144,12 @@ package final class CurrentEntitlementReconciler: Sendable {
                         snapshot: envelope.value,
                         acceptance: await core.accept(envelope)
                     ))
-            case .unverified(let error):
-                verificationFailures.append(error)
+            case .unverified(let revision, let error):
+                verificationFailures.append(
+                    UnfinishedVerificationFailure(
+                        revision: revision,
+                        error: error
+                    ))
             }
         }
 
@@ -128,6 +158,17 @@ package final class CurrentEntitlementReconciler: Sendable {
             acceptedTransactions: acceptedTransactions,
             verificationFailures: verificationFailures
         )
+    }
+
+    private func collectUnfinishedVerificationFailures(
+        _ verificationFailures: [UnfinishedVerificationFailure],
+        observedRevisions: inout Set<Data>,
+        observedFailures: inout [any Error]
+    ) {
+        for failure in verificationFailures
+        where observedRevisions.insert(failure.revision).inserted {
+            observedFailures.append(failure.error)
+        }
     }
 
     private func reportVerificationFailures(

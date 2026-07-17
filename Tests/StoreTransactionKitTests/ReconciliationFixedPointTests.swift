@@ -341,7 +341,8 @@ struct ReconciliationFixedPointTests {
         let finishes = TestSignal()
         let reports = StringRecorder()
         let unverified = StoreTransactionDelivery.unverified(
-            PersistentUnfinishedVerificationFailure()
+            revision: Data("persistent-unverified".utf8),
+            error: PersistentUnfinishedVerificationFailure()
         )
         let verified = StoreTransactionDelivery.verified(
             makeEnvelope(snapshot: snapshot) {
@@ -392,6 +393,64 @@ struct ReconciliationFixedPointTests {
         #expect(await unfinishedQueryCount.value() == 3)
         #expect(await handlerCalls.value() == 1)
         #expect(await finishes.value() == 1)
+        #expect(await reports.snapshot() == ["unverified"])
+        await core.finishInputAndDrain()
+        await failures.sealAndDrain()
+    }
+
+    @Test("an observed unverified unfinished delivery is reported after it disappears")
+    func disappearingUnverifiedUnfinishedIsReported() async throws {
+        let snapshot = makeSnapshot(
+            id: 49,
+            productID: "lifetime.disappearing-verification",
+            productType: .nonConsumable,
+            jws: "disappearing-unfinished-verification"
+        )
+        let current = EntitlementValueSource([])
+        let unfinished = UnfinishedValueSource()
+        let reports = StringRecorder()
+        let unverified = StoreTransactionDelivery.unverified(
+            revision: Data("disappearing-unverified".utf8),
+            error: DisappearingUnfinishedVerificationFailure()
+        )
+        let verified = StoreTransactionDelivery.verified(
+            makeEnvelope(snapshot: snapshot) {
+                await current.replace(with: [snapshot])
+                await unfinished.replace(with: [])
+            }
+        )
+        await unfinished.replace(with: [unverified, verified])
+
+        let core = TransactionProcessingCore<StoreTransactionSnapshot> { _ in }
+        let failures = FailureReporterDispatcher { failure in
+            guard failure.source == .unfinished,
+                failure.transactionID == nil,
+                failure.productID == nil,
+                failure.underlyingError
+                    is DisappearingUnfinishedVerificationFailure
+            else {
+                await reports.append("unexpected")
+                return
+            }
+            await reports.append("unverified")
+        }
+        let reconciler = CurrentEntitlementReconciler(
+            query: {
+                CurrentEntitlementQueryResult(
+                    snapshots: await current.read(),
+                    verificationFailures: []
+                )
+            },
+            queryUnfinished: { await unfinished.read() },
+            core: core,
+            failures: failures
+        )
+
+        let snapshots = try await reconciler.query(
+            retryFailedTransactions: false
+        )
+
+        #expect(snapshots == [snapshot])
         #expect(await reports.snapshot() == ["unverified"])
         await core.finishInputAndDrain()
         await failures.sealAndDrain()
@@ -457,7 +516,10 @@ struct ReconciliationFixedPointTests {
                     return []
                 }
                 return [
-                    .unverified(TerminalUnfinishedVerificationFailure()),
+                    .unverified(
+                        revision: Data("terminal-unverified".utf8),
+                        error: TerminalUnfinishedVerificationFailure()
+                    ),
                     .verified(
                         makeEnvelope(snapshot: snapshot) {
                             await finishes.send()
@@ -496,6 +558,8 @@ private struct DiscardedVerificationFailure: Error, Sendable {}
 private struct StableVerificationFailure: Error, Sendable {}
 
 private struct PersistentUnfinishedVerificationFailure: Error, Sendable {}
+
+private struct DisappearingUnfinishedVerificationFailure: Error, Sendable {}
 
 private struct TerminalUnfinishedVerificationFailure: Error, Sendable {}
 

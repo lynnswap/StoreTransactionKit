@@ -21,7 +21,8 @@ package enum LiveTransactionAdapter {
                 ))
         case .unverified(_, let error):
             return .unverified(
-                StoreTransactionVerificationError(
+                revision: Data(result.jwsRepresentation.utf8),
+                error: StoreTransactionVerificationError(
                     underlyingError: error
                 ))
         }
