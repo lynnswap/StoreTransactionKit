@@ -64,6 +64,9 @@
             ReferencedContainer = "container:StoreTransactionKitTestApp.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
+      <StoreKitConfigurationFileReference
+         identifier = "../../StoreKitTest.storekit">
+      </StoreKitConfigurationFileReference>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"

@@ -98,7 +98,7 @@ jobs:
   ios-tests:
     name: Package Tests (iOS Simulator)
     runs-on: macos-26
-    timeout-minutes: 20
+    timeout-minutes: 10
     env:
       XCODE_VERSION: "26.5"
     steps:
