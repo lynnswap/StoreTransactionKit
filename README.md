@@ -23,8 +23,9 @@ The store owns the durable transaction path for the process lifetime:
 - Verification: only verified transactions reach policy code; direct failures
   throw, and an optional delegate can receive background failures
 - Ordering: verification, an optional app policy decision, then `finish()` only
-  when permitted. Finished revisions are deduplicated for the process lifetime,
-  while unfinished decisions are coalesced only through their causal attempt.
+  when permitted. A bounded process-local cache suppresses recent completed
+  revisions, while unfinished decisions are coalesced only through their causal
+  attempt.
 - State: the observable current-entitlement projection, restore
   synchronization, background failure delivery, and explicit shutdown
 
@@ -39,8 +40,11 @@ Your app owns everything the user sees and everything it persists:
 
 ## Quick start
 
-Define the app entitlements, then describe one App Store Connect subscription
-group with its Product IDs:
+The API in this Quick start is proposed for the next beta and is not implemented
+in the current source yet.
+
+Define the app entitlements, then describe one App Store Connect auto-renewable
+subscription group with its Product IDs:
 
 ```swift
 import StoreTransactionKit
@@ -50,7 +54,7 @@ enum SubscriptionEntitlement: Hashable, Sendable {
     case tier2
 }
 
-enum Plans: SubscriptionGroup {
+enum Plans: AutoRenewableSubscriptionGroup {
     static let id = SubscriptionGroupID(
         rawValue: "YOUR_SUBSCRIPTION_GROUP_ID"
     )
@@ -75,7 +79,7 @@ enum Plans: SubscriptionGroup {
     }
 }
 
-let subscriptionCatalog = SubscriptionCatalog(Plans.self)
+let subscriptionCatalog = AutoRenewableSubscriptionCatalog(Plans.self)
 ```
 
 `TransactionStore` is `@MainActor` and `@Observable`. It starts monitoring
@@ -161,7 +165,8 @@ struct ContentView: View {
 Replace `Plans.id` and the nested Product ID raw values with the identifiers
 configured in [App Store Connect][subscription-setup]. Map monthly and yearly
 products that grant the same access level to the same app entitlement. StoreKit
-remains the source of truth for levels and durations.
+owns upgrade and downgrade ordering and each product's renewal period; the
+catalog owns the app-access meaning of each Product ID.
 
 For local StoreKit Testing, use the same values in the active `.storekit`
 configuration. See [Setting up StoreKit Testing in Xcode][storekit-testing].
@@ -189,15 +194,19 @@ let store = TransactionStore(
 
 ## Transaction delegate
 
-Without a delegate, the store uses its built-in `.finish` policy for verified
-transactions. Supply a delegate when the app must apply its own durable effect
-or receive background failure notifications:
+Without a delegate, `.automatic` handling finishes only catalog-validated
+auto-renewable subscriptions. Supply a delegate when the app handles other
+product types, applies another durable effect, or needs background diagnostics:
 
 ```swift
 final class AppTransactionDelegate: TransactionStoreDelegate {
     func transactionStore(
         decidePolicyFor transaction: StoreTransactionSnapshot
     ) async throws -> StoreTransactionHandlingPolicy {
+        guard transaction.productType == .consumable else {
+            return .automatic
+        }
+
         try await persist(transaction)
         return .finish
     }
@@ -215,8 +224,11 @@ let store = TransactionStore(
 )
 ```
 
-`transactionStore(decidePolicyFor:)` owns the app's durable transaction
-correctness:
+Both delegate methods are optional through default implementations. The decision
+defaults to `.automatic`; the failure notification defaults to a no-op.
+
+When the app implements `transactionStore(decidePolicyFor:)`, it owns the
+durable correctness of every non-automatic decision:
 
 - **Be idempotent.** Delivery is at least once; key the ledger on transaction
   identity plus the business event it applies.
@@ -227,15 +239,22 @@ correctness:
   calls `finish()`. Return `.keepUnfinished` only after deliberately choosing
   to leave the transaction eligible for a later attempt; throw when neither
   decision can be completed.
-- **Never call back into the same store** from either delegate method, even
-  through an awaited detached task — doing so creates a dependency cycle with
-  the work being handled.
+- **Don't start another operation on the same store** from either delegate
+  method, even through an awaited detached task. Calling `process(_:)`,
+  `refreshEntitlements()`, `history(for:)`, `restorePurchases()`, or `close()`
+  there can create a dependency cycle with the work being handled. The store
+  retains its delegate, so any delegate reference back to the store must also be
+  weak.
 
-`transactionStore(didFailWith:)` is an optional notification with a default
-no-op implementation. Its return cannot change the transaction decision.
+`.automatic` is not unconditional finish: a catalog mismatch fails before the
+delegate is called, and a catalog-external product fails as unhandled unless the
+delegate explicitly decides how to process it.
+
+`transactionStore(didFailWith:)` is a notification. Its return cannot change the
+transaction decision.
 
 The full decision, redelivery, and failure-routing contracts are documented in
-the [API design](Docs/SubscriptionCatalogAPI.md).
+the [API design](Docs/AutoRenewableSubscriptionCatalogAPI.md).
 
 ## How entitlement availability behaves
 
@@ -254,13 +273,13 @@ the [API design](Docs/SubscriptionCatalogAPI.md).
   Consult `entitlementStatus` only when the app needs to explain where the
   entitlement set came from or why it is unavailable.
 - A successful refresh after `.failed` publishes `.ready` and the new active
-  entitlement set. A background query or thrown delegate error after `.ready`
-  preserves the last active set and reports the failure through
+  entitlement set. A background query or transaction-handling error after
+  `.ready` preserves the last active set and reports the failure through
   `transactionStore(didFailWith:)`.
 - A verified catalog mismatch fails closed: it changes the status to `.failed`
   and clears both entitlement projections instead of preserving stale access.
 - Startup and every refresh reconcile `Transaction.unfinished` — including
-  consumables — before publishing state. A thrown delegate error fails that
+  consumables — before publishing state. A transaction-handling error fails that
   refresh; the next refresh retries the unfinished work.
 - Transactions superseded by a subscription upgrade stay in `entitlements` but
   don't appear in `activeEntitlements`.
@@ -268,9 +287,9 @@ the [API design](Docs/SubscriptionCatalogAPI.md).
   `transactionStore(didFailWith:)` with source
   `.currentEntitlementVerification`.
 - Product IDs mapped to the same app entitlement appear as the same typed value.
-- `SubscriptionCatalog` maps auto-renewable subscriptions only. Other product
-  types don't belong to subscription groups; consumables remain part of
-  transaction handling and never appear in current entitlements.
+- `AutoRenewableSubscriptionCatalog` maps auto-renewable subscriptions only.
+  Other product types don't belong to subscription groups; consumables remain
+  part of transaction handling and never appear in current entitlements.
 
 ## Beyond the basics
 
@@ -299,9 +318,9 @@ explains which purchase entry point to use for each UI framework and platform.
 
 ## API design
 
-See [StoreTransactionKit API design](Docs/SubscriptionCatalogAPI.md) for the
-proposed public interface, validation rules, ownership boundaries, and state
-transition contract behind the Quick start.
+See [StoreTransactionKit API design](Docs/AutoRenewableSubscriptionCatalogAPI.md)
+for the proposed public interface, validation rules, ownership boundaries, and
+state transition contract behind the Quick start.
 
 ## Testing
 
@@ -315,21 +334,20 @@ import Testing
 @Test
 @MainActor
 func subscriptionUpdatesViewModel() async throws {
-    let harness = try await TransactionStoreTestHarness(
+    try await withTransactionStoreTestHarness(
         subscriptionCatalog: subscriptionCatalog
-    )
-    let viewModel = NotesViewModel(store: harness.store)
+    ) { harness in
+        let viewModel = NotesViewModel(store: harness.store)
 
-    #expect(!viewModel.canExportPDF)
+        #expect(!viewModel.canExportPDF)
 
-    try await harness.purchase(
-        .tier1_Monthly,
-        in: Plans.self
-    )
+        try await harness.purchase(
+            .tier1_Monthly,
+            in: Plans.self
+        )
 
-    #expect(viewModel.canExportPDF)
-
-    try await harness.close()
+        #expect(viewModel.canExportPDF)
+    }
 }
 ```
 
