@@ -1,89 +1,94 @@
-# Auto-renewable subscription catalog, delegate, override, and testing API design
+# Auto-renewable subscription API design
 
-Status: Proposed for the next beta API. The README shows this design, but the
-source implementation and symbol documentation do not provide it yet.
+Status: Proposed for the next beta API.
+
+This document is the source of truth for the proposal only. The public source,
+README, and symbol documentation continue to describe the currently released
+API until the implementation transaction is complete. After implementation,
+the public contracts move to symbol DocC and a consumer article, and this
+temporary design document is removed.
 
 ## Purpose
 
 StoreTransactionKit needs to translate StoreKit Product IDs into the app's
 feature-access vocabulary without making Product IDs themselves the public
-entitlement type. The translation must represent App Store Connect
-subscription groups accurately, reject configuration drift, and preserve the
-difference between unavailable entitlement state and a resolved empty set.
+entitlement type. The first consumer is an app with one App Store Connect
+auto-renewable subscription group containing multiple access levels and
+multiple durations at each level.
 
-The same typed entitlement model must also support an app-selected StoreKit
-bypass and deterministic app or ViewModel tests. Those paths must not invent
-StoreKit transactions or fork production entitlement semantics.
-
-The primary consumer is an app with one auto-renewable subscription group that
-contains multiple access levels and multiple durations at each level. A second
-supported consumer has multiple independent subscription groups whose products
-map into one app entitlement type.
+The same entitlement domain must support an app-selected StoreKit bypass and
+deterministic app or ViewModel tests. Those paths use the production state and
+transaction pipeline without inventing StoreKit transactions in app code.
 
 ## Goals
 
-- Scope each Product ID type to one App Store Connect subscription group.
-- Map multiple billing durations at the same access level to one app
-  entitlement.
-- Keep StoreKit's subscription group level and duration metadata in StoreKit.
-- Validate the remote transaction metadata that the app's static catalog can
-  know about without loading products eagerly.
+- Scope the Product ID type to one auto-renewable subscription group.
+- Map multiple billing durations at one access level to one app entitlement.
+- Keep StoreKit group levels and renewal periods in StoreKit rather than copying
+  them into the catalog.
+- Validate every piece of verified transaction metadata that the static catalog
+  can know.
 - Publish raw and typed entitlement state as one atomic snapshot.
-- Keep the surrounding app UI usable while entitlement state is unavailable.
-- Support one group in the common case and explicit composition for independent
-  groups.
-- Finish automatically only when a transaction is a validated auto-renewable
-  subscription managed by the catalog; require an app decision for every other
-  product.
-- Separate the finish decision from optional background-failure notification.
-- Let the app construct a fixed entitlement override without environment
-  detection inside the framework.
-- Let tests drive the real transaction and entitlement pipeline without a
-  `.storekit` configuration or timing guesses.
-- Separate virtual time control from causal operation completion.
+- Distinguish unavailable entitlement state from an available empty set.
+- Keep normal app UI usable while entitlement state is unavailable.
+- Finish automatically only for a catalog-validated auto-renewable transaction.
+- Give other product types an explicit app-owned handling decision.
+- Make every background-owned failure observable without requiring a delegate.
+- Allow fixed entitlement overrides without framework-owned environment checks.
+- Let tests drive the production pipeline without a `.storekit` file or timing
+  guesses.
+- Make terminal shutdown and the single-live-store invariant enforceable.
 
 ## Non-goals
 
+- The initial catalog does not compose multiple subscription groups. Supporting
+  that requires per-group availability and failure isolation rather than one
+  all-or-nothing entitlement projection.
 - The catalog does not describe consumables, non-consumables, or non-renewing
   subscriptions.
-- The catalog does not own product merchandising, prices, localized names,
-  purchase UI, renewal UI, or `Product.SubscriptionInfo.Status`.
+- The catalog does not own prices, localized merchandising, purchase UI,
+  renewal UI, or `Product.SubscriptionInfo.Status`.
 - The framework does not infer app access from StoreKit `groupLevel`.
-- The framework does not infer an entitlement for an unknown product.
+- The framework does not infer an entitlement for an undeclared Product ID.
 - The framework does not detect TestFlight, previews, debug builds, receipts,
-  or other distribution environments to select override mode.
+  or other environments to select override mode.
 - The no-configuration test harness does not validate StoreKit verification,
   JWS, App Store Connect metadata, system purchase UI, or StoreKit renewal
   scheduling.
 - Advancing a test clock does not mean that the transaction pipeline is idle or
-  that an entitlement update has been published.
-- The design does not retain the current Product-ID-as-entitlement API for
-  source compatibility. The package is still beta.
+  that an entitlement publication has completed.
+- Source compatibility with the current Product-ID-as-entitlement API is not a
+  goal while the package is beta.
 
 ## StoreKit model
 
-An App Store Connect subscription group contains auto-renewable subscriptions
-with different access levels and durations. A customer can hold one
-subscription product in a group at a time. Products at one level may have
-monthly and yearly variants.
+An App Store Connect subscription group contains auto-renewable products with
+different access levels and durations. A customer holds one subscription
+product in a group at a time. Products at one level may have monthly and yearly
+variants.
 
 StoreKit owns these facts:
 
 - `Product.SubscriptionInfo.subscriptionGroupID` identifies the group.
-- `Product.SubscriptionInfo.groupLevel` ranks upgrade and downgrade paths;
+- `Product.SubscriptionInfo.groupLevel` orders upgrade and downgrade paths;
   level `1` is the highest service level.
 - `Product.SubscriptionInfo.subscriptionPeriod` describes the renewal period.
 - `Transaction.currentEntitlements` includes current non-consumables,
   qualifying auto-renewable subscriptions, and non-renewing subscriptions. It
   excludes consumables.
 
-The app owns the meaning of access. `SubscriptionEntitlement.tier1` is an app
-domain value; it is not a copy of StoreKit `groupLevel == 1`. The explicit
-Product ID mapping is the boundary between the two models.
+The app owns access meaning. `SubscriptionEntitlement.tier1` is an app-domain
+value, not a copy of `groupLevel == 1`. The explicit Product ID mapping is the
+boundary between those models.
 
 ## Consumer story
 
+Define the app entitlements and the Product IDs belonging to one subscription
+group:
+
 ```swift
+import StoreTransactionKit
+
 enum SubscriptionEntitlement: Hashable, Sendable {
     case tier1
     case tier2
@@ -115,16 +120,93 @@ enum Plans: AutoRenewableSubscriptionGroup {
 }
 
 let subscriptionCatalog = AutoRenewableSubscriptionCatalog(Plans.self)
-
-let store = TransactionStore(
-    subscriptionCatalog: subscriptionCatalog
-)
-
-let canExportPDF = store.isEntitled(to: .tier1)
 ```
 
-The app can use the same catalog and entitlement type for a fixed StoreKit
-bypass:
+Create one live store at the process composition root and inject that same
+instance into SwiftUI:
+
+```swift
+import StoreTransactionKit
+import SwiftUI
+
+@main
+struct ExampleApp: App {
+    @State private var store: TransactionStore<SubscriptionEntitlement>
+
+    init() {
+        _store = State(
+            initialValue: TransactionStore(
+                subscriptionCatalog: subscriptionCatalog
+            )
+        )
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            NavigationStack {
+                ContentView()
+            }
+            .environment(store)
+        }
+    }
+}
+```
+
+Gate only the paid feature. Loading or a failed entitlement query does not
+replace the rest of the view:
+
+```swift
+import StoreKit
+import StoreTransactionKit
+import SwiftUI
+
+struct ContentView: View {
+    @Environment(TransactionStore<SubscriptionEntitlement>.self) private var store
+    @State private var isShowingPaywall = false
+
+    private var canExportPDF: Bool {
+        store.isEntitled(to: .tier1)
+    }
+
+    var body: some View {
+        List {
+            Section {
+                NavigationLink("All notes") {
+                    NotesView()
+                }
+            }
+
+            Section {
+                Button("Export as PDF") {
+                    exportPDF()
+                }
+                .disabled(!canExportPDF)
+
+                Button("Plans and subscriptions") {
+                    isShowingPaywall = true
+                }
+            } header: {
+                Text("Premium")
+            }
+        }
+        .sheet(isPresented: $isShowingPaywall) {
+            SubscriptionStoreView(groupID: Plans.id.rawValue)
+        }
+    }
+}
+```
+
+Monthly and yearly products granting the same access map to the same
+entitlement. StoreKit owns upgrade and downgrade ordering. If several plan
+identities grant one feature, the app checks the accepted entitlement values;
+the catalog does not infer tier inclusion.
+
+No active subscription is represented by `.ready` with an empty
+`activeEntitlements` set. It is distinct from `.loading` or `.failed`, where
+`activeEntitlements` is `nil`.
+
+For an app-defined environment that bypasses StoreKit, provide the exact set to
+activate:
 
 ```swift
 let store = TransactionStore(
@@ -136,16 +218,8 @@ let store = TransactionStore(
 )
 ```
 
-The app owns the condition that selects this initializer. Passing an empty
-sequence explicitly selects override mode with no active entitlement.
-
-An app with independent groups composes them without erasing their nested
-Product ID types:
-
-```swift
-let subscriptionCatalog = AutoRenewableSubscriptionCatalog(Plans.self)
-    .including(ChannelSubscriptions.self)
-```
+The app owns the condition selecting this initializer. An empty sequence means
+override mode with no active entitlement.
 
 ## Proposed public interface
 
@@ -176,15 +250,10 @@ public struct AutoRenewableSubscriptionCatalog<Entitlement>: Sendable
 where Entitlement: Hashable & Sendable {
     public init<Group>(_ groupType: Group.Type)
     where Group: AutoRenewableSubscriptionGroup<Entitlement>
-
-    public func including<Group>(
-        _ groupType: Group.Type
-    ) -> Self
-    where Group: AutoRenewableSubscriptionGroup<Entitlement>
 }
 
 public enum AutoRenewableSubscriptionCatalogError: LocalizedError, Sendable {
-    case unknownProduct(
+    case undeclaredProduct(
         productID: Product.ID,
         subscriptionGroupID: SubscriptionGroupID
     )
@@ -210,13 +279,18 @@ public enum EntitlementStatus: Sendable {
 
 public enum StoreTransactionOperation: Sendable, Hashable {
     case processPurchase
-    case currentEntitlements
+    case refreshEntitlements
     case history
     case restorePurchases
     case close
 }
 
-public enum StoreTransactionError: Error, Sendable, Hashable {
+public enum StoreTransactionError: Error, Sendable {
+    public enum CompletedOperation: Sendable, Hashable {
+        case finishedTransaction(StoreTransactionSnapshot)
+        case synchronizedPurchases
+    }
+
     case closing
     case closed
     case unknownPurchaseResult
@@ -225,40 +299,44 @@ public enum StoreTransactionError: Error, Sendable, Hashable {
         productType: Product.ProductType
     )
     case reentrantOperation(operation: StoreTransactionOperation)
-    case operationUnavailableInOverride(operation: StoreTransactionOperation)
+    case operationUnavailableInOverride(
+        operation: StoreTransactionOperation
+    )
+    case entitlementRefreshFailed(
+        after: CompletedOperation,
+        underlyingError: any Error
+    )
 }
 
 public enum StoreTransactionHandlingPolicy: Sendable, Hashable {
     case automatic
     case finish
-    case keepUnfinished
 }
 
 public protocol TransactionStoreDelegate: AnyObject, Sendable {
-    func transactionStore(
-        decidePolicyFor transaction: StoreTransactionSnapshot
+    func decidePolicy(
+        for transaction: StoreTransactionSnapshot
     ) async throws -> StoreTransactionHandlingPolicy
 
-    func transactionStore(
-        didFailWith failure: StoreTransactionBackgroundFailure
+    func didFail(
+        with failure: StoreTransactionBackgroundFailure
     ) async
 }
 
 public extension TransactionStoreDelegate {
-    func transactionStore(
-        decidePolicyFor transaction: StoreTransactionSnapshot
+    func decidePolicy(
+        for transaction: StoreTransactionSnapshot
     ) async throws -> StoreTransactionHandlingPolicy {
         .automatic
     }
 
-    func transactionStore(
-        didFailWith failure: StoreTransactionBackgroundFailure
+    func didFail(
+        with failure: StoreTransactionBackgroundFailure
     ) async {}
 }
 
 public enum StorePurchaseOutcome: Sendable, Hashable {
     case completed(StoreTransactionSnapshot)
-    case keptUnfinished(StoreTransactionSnapshot)
     case pending
     case userCancelled
 }
@@ -301,298 +379,207 @@ where Entitlement: Hashable & Sendable {
 }
 ```
 
-## Optional transaction delegate
+`StoreTransactionError` is not `Hashable`: the post-completion failure preserves
+an arbitrary underlying error, and no consumer requires errors as collection
+keys.
 
-Omitting `delegate` uses `.automatic` handling and performs no app-specific
-failure notification. The store strongly retains a supplied delegate until
-`close()` finishes or the store is deinitialized.
+## Catalog contract
 
-`TransactionStoreDelegate` follows the decision/notification split used by
-`WKNavigationDelegate`: a method that grants permission for a consequential
-operation returns a policy, while a method that reports an event that has
-already occurred returns no policy. The transaction method is also `throws`
-because failing to reach a decision is different from deliberately choosing a
-normal policy.
+### Type-safety boundary
 
-Both methods have default implementations. A delegate interested only in
-background diagnostics implements `transactionStore(didFailWith:)` and inherits
-`.automatic` transaction handling. A delegate interested only in transaction
-policy implements the decision method and inherits the no-op notification.
-
-Before applying a policy, the catalog classifies each verified transaction:
-
-- A **managed** transaction has a declared Product ID, `productType ==
-  .autoRenewable`, and the declared subscription group ID. A superseded
-  transaction with `isUpgraded == true`, `.autoRenewable` type, and a managed
-  group is also managed for finishing even when its retired Product ID is no
-  longer declared; it cannot grant typed access. A Product ID that is still
-  declared must match its declaration in either case.
-- An **invalid** transaction uses a declared Product ID with the wrong type or
-  group, or an undeclared non-upgraded Product ID inside a managed group. It
-  fails with `AutoRenewableSubscriptionCatalogError` before the delegate is
-  called and is never finished.
-- An **unmanaged** transaction belongs outside the catalog: a consumable,
-  non-consumable, non-renewing subscription, or an auto-renewable subscription
-  in another group.
-
-The decision method is called for managed and unmanaged transactions. Its
-policies mean:
-
-- `.automatic` is the safe default. It finishes a managed transaction and
-  throws `StoreTransactionError.unhandledTransaction` for an unmanaged one. It
-  is not an alias for unconditional `.finish`.
-- `.finish` means the app has durably applied this business event, or has
-  established from its idempotency ledger that the event was already applied.
-  StoreTransactionKit then calls `finish()`, records the exact transaction
-  revision as completed, refreshes current entitlements, and publishes the
-  resulting state.
-- `.keepUnfinished` means the app reached an expected deferral decision and,
-  when its own model requires it, recorded that decision durably. It is not a
-  substitute for catching a processing error. StoreTransactionKit does not call
-  `finish()` or send a failure notification, but it continues the causal
-  entitlement refresh. A direct purchase returns
-  `.keptUnfinished(transaction)` after that refresh and MainActor publication
-  complete.
-- Throwing means that the delegate could not establish either a durable
-  `.finish` decision or a valid `.keepUnfinished` decision. StoreTransactionKit
-  does not call `finish()`. A direct operation forwards the error to its caller;
-  background-owned work sends it to `transactionStore(didFailWith:)`. A later
-  independent attempt can redeliver the transaction.
-
-This keeps subscription-only apps concise without allowing the default path to
-finish a consumable or another product that has no handling owner. An app that
-also sells such products implements the decision method, persists the product's
-business effect, and returns `.finish`. An app that only wants diagnostics can
-implement the notification method alone; an unmanaged background transaction
-then arrives there as an `unhandledTransaction` failure.
-
-The transaction-processing coordinator owns one causal decision receipt for an
-exact revision from admission through completion of the refresh caused by that
-decision. Direct results, `Transaction.updates`, and
-`Transaction.unfinished` reconciliation all attach to that receipt instead of
-invoking the delegate again. Coalesced reservations share the same receipt, and
-the reconciler seeds its exact-revision exclusion set from every receipt in the
-physical refresh. The receipt completes only after the refresh succeeds or
-fails and all attached callers and reporting owners receive that result.
-
-`.keepUnfinished` is not added to the bounded completed-revision cache or the
-failed-attempt set. The causal receipt is discarded when its physical refresh
-completes, after which a non-coalesced update, status change, explicit refresh,
-restore, or startup attempt may present the exact revision again.
-StoreTransactionKit does not schedule a timer or backoff retry. Coalescing uses
-exact revision identity rather than transaction ID, so a later revocation or
-another revised business event is not suppressed. Any app-owned effect performed
-before returning a policy must remain idempotent.
-
-Completed revisions enter a bounded process-local cache. The cache prevents
-nearby duplicate delivery from repeating policy work, but it is not a durable
-business ledger and does not promise process-lifetime retention. Eviction may
-allow an exact revision to be presented again, so an app delegate's durable
-effect remains idempotent.
-
-`transactionStore(didFailWith:)` is an optional observation hook with a default
-no-op implementation. It cannot change a transaction decision, request a retry,
-or suppress a thrown error. Admitted notifications are delivered serially with
-backpressure, and `close()` waits for each invocation to return. Direct errors
-that reach an attached caller are not duplicated as background notifications.
-
-A weak app delegate would allow its policy and diagnostic receiver to disappear
-after initialization. The store therefore retains its delegate strongly, and a
-delegate that keeps a reference back to the store must make that reference weak.
-The delegate must not start an admission-bearing operation on the same store —
-`process(_:)`, `refreshEntitlements()`, `history(for:)`, `restorePurchases()`, or
-`close()` — directly or through an awaited child or detached task. Read-only
-entitlement inspection does not enter the transaction coordinator and is not a
-`reentrantOperation`. The methods omit a store parameter because policy normally
-depends on the supplied transaction, not on the store's generic entitlement
-type.
-
-The protocol is class-bound and `Sendable`, but it is not actor-bound. A
-delegate that owns mutable state directly can be an actor. A checked-Sendable
-`final class` with immutable `Sendable` dependencies is equally valid. Runtime
-delivery ordering does not make an otherwise unsynchronized mutable class safe.
-
-`StoreTransactionOperation` is the existing closed diagnostic vocabulary rather
-than a free-form string. The new error case reuses it so an override-mode
-failure identifies the rejected operation without parsing text.
-
-`AutoRenewableSubscriptionGroup` is a client-conformance protocol because each
-app supplies its own closed group definition. Its requirements remain
-intentionally small. The protocol itself is not `Sendable`, and `ProductID` does
-not require `Hashable` or `Sendable`: the catalog consumes `allCases`
-synchronously and normalizes each case to its raw `String` during construction.
-No group instance, group metatype, or typed Product ID is retained.
-
-Adding a protocol requirement after 1.0 would break client conformances. Future
-optional metadata belongs in catalog initializers or configuration values, not
-in a new `AutoRenewableSubscriptionGroup` requirement.
-
-`AutoRenewableSubscriptionCatalog` is an immutable value. `including(_:)`
-returns another catalog and leaves the receiver unchanged. This keeps the
-one-group use case to one line while supporting the StoreKit case where
-independent subscriptions must live in separate groups.
-
-## Type-safety boundary
-
-The API provides compile-time safety for app-owned declarations:
-
-- `Plans.ProductID` cannot be passed where another group's nested Product ID is
-  expected.
-- The exhaustive `switch` in `entitlement(for:)` maps every declared Product ID.
-- `SubscriptionGroupID` prevents a group identifier from being confused with an
-  arbitrary Product ID at API boundaries.
-- `TransactionStore` exposes the app's `Entitlement`, not raw Product IDs, to
-  feature-gating code.
-- `isEntitled(to:)` expresses a feature gate without exposing optional-set
-  mechanics at each call site.
+The nested Product ID type prevents a Product ID declared for another group
+from being passed to a group-specific API. The exhaustive
+`entitlement(for:)` switch maps every declared Product ID, and
+`SubscriptionGroupID` prevents group IDs from being confused with Product IDs.
+Feature code sees the app's `Entitlement`, not raw identifiers.
 
 The compiler cannot validate App Store Connect. Runtime validation is therefore
-part of the catalog contract rather than a substitute source of truth.
+part of the catalog contract. The name `SubscriptionGroupID` mirrors StoreKit's
+`subscriptionGroupID`; the auto-renewable qualifier belongs on the group and
+catalog types that define product scope.
 
-The identifier remains `SubscriptionGroupID`, rather than
-`AutoRenewableSubscriptionGroupID`, because it mirrors StoreKit's
-`subscriptionGroupID` vocabulary and StoreKit subscription groups already imply
-auto-renewable subscriptions. The longer qualifier belongs on the app-defined
-group protocol and catalog, where it distinguishes their product scope.
-Initializer labels remain `subscriptionCatalog:` because the argument's static
-type already carries the `AutoRenewable` qualifier.
+The client-conformance protocol stays intentionally small. The catalog consumes
+`ProductID.allCases` synchronously and stores normalized strings plus the
+`ObjectIdentifier` of the declaring group type. It retains no group instance,
+group metatype, or typed Product ID. The declaration identity is used only to
+prevent a testing command from substituting another conformance with the same
+raw identifiers but a different mapping. Future optional metadata belongs in a
+configuration value or catalog initializer rather than a new protocol
+requirement.
 
-`SubscriptionGroupID.init(rawValue:)` preconditions that the raw value is not
-empty. The identifier type owns that invariant because the value is also useful
-outside the catalog, such as when passing `Plans.id.rawValue` to StoreKit UI.
+### Construction
 
-## Catalog construction
+`SubscriptionGroupID.init(rawValue:)` preconditions that its value is not empty.
+Catalog construction performs no StoreKit request and preconditions that:
 
-Construction converts each group into normalized internal entries keyed by raw
-Product ID. It also records the set of managed subscription group IDs.
+- `ProductID.allCases` is not empty.
+- Every Product ID raw value is nonempty.
+- No raw Product ID is repeated within the group.
 
-The following remaining source-defined configuration errors fail with a
-`precondition` during catalog construction:
+These are static programmer errors, so the initializer remains nonthrowing.
+Duplicate entitlement values are valid and expected for monthly and yearly
+products at one access level.
 
-- A group whose `ProductID.allCases` is empty.
-- An empty Product ID raw value.
-- A duplicate raw Product ID within one group or across included groups.
-- A duplicate subscription group ID.
-
-These are programmer errors in static app configuration. A nonthrowing
-initializer keeps the normal composition root free of `try!`; the behavior is
-analogous to `Dictionary(uniqueKeysWithValues:)` rejecting duplicate keys.
-Duplicate checks remain necessary because a manually implemented
-`RawRepresentable` or `CaseIterable` can violate the guarantees normally
-provided by a raw-value enum.
-
-Duplicate entitlement values are valid. Monthly and yearly products at one
-access level are expected to produce the same entitlement, and independent
-groups may grant the same app entitlement.
-
-`AutoRenewableSubscriptionCatalogError.errorDescription` includes the Product
-ID and the expected and actual metadata needed to diagnose App Store Connect
-drift. These descriptions are developer diagnostics and are not end-user
-presentation copy. The public cases remain distinct so diagnostics and contract
-tests can identify whether the shipped catalog is missing a product, names the
-wrong product type, or assigns a product to the wrong group.
-
-Catalog construction performs no network request and does not load `Product`
-values. Product metadata is validated only when StoreKit supplies a verified
-transaction snapshot.
-
-## Runtime projection and validation
+### Runtime validation and projection
 
 For each verified transaction in a candidate `StoreEntitlements` snapshot, the
-catalog applies these rules before anything is published:
+catalog applies these rules before publication:
 
-1. A transaction with `isUpgraded == true` remains in raw `entitlements` and is
-   excluded from typed projection. It no longer grants access, so it does not
-   require a current catalog entry.
-2. A declared Product ID must have `productType == .autoRenewable`.
-3. A declared Product ID must have the subscription group ID declared by its
-   `AutoRenewableSubscriptionGroup`.
-4. An undeclared Product ID whose transaction belongs to a managed group fails
-   with `AutoRenewableSubscriptionCatalogError.unknownProduct` because the
-   framework cannot infer its app entitlement.
-5. An undeclared product outside every managed group remains in raw
-   `entitlements` and is ignored by the typed projection.
-6. Successful mappings are collected into a `Set`, so multiple durations and
-   multiple groups may produce one typed entitlement value.
+1. A declared Product ID must have `productType == .autoRenewable`.
+2. A declared Product ID must have the catalog's subscription group ID.
+3. A declared, non-upgraded transaction maps to its typed entitlement.
+4. A declared transaction with `isUpgraded == true` remains raw but grants no
+   typed access.
+5. An undeclared, non-upgraded Product ID in the catalog's group fails with
+   `undeclaredProduct`; the framework cannot infer its access meaning.
+6. An undeclared upgraded transaction in the catalog's group is accepted only
+   when its type is `.autoRenewable`; any other type fails with
+   `productTypeMismatch`. A valid upgraded transaction remains raw, can be
+   finished by `.automatic`, and grants no typed access. This permits retiring
+   a Product ID after no supported customer can hold it as current.
+7. A product outside the catalog's group remains raw and is ignored by the
+   typed projection.
 
-The upgrade filter runs before catalog lookup, so an upgraded historical
-transaction alone does not require its retired Product ID to remain in the
-catalog. The ID must remain while any supported customer can still hold that
-product as a non-upgraded current entitlement. Every non-upgraded known or
-managed-group transaction is validated before publication.
+Every applicable transaction is validated before anything is published.
+Successful mappings form a `Set`, so multiple durations can produce one
+entitlement value.
 
-The catalog is a closed definition of every group it manages. Adding a Product
-ID in App Store Connect can therefore make an older app binary report
-`unknownProduct` after a user moves to that product. Product rollout must account
-for supported older app versions; silently guessing a tier would risk granting
-the wrong access.
+The catalog is a closed declaration of the group it manages. Adding a product
+in App Store Connect can therefore make an older binary report
+`undeclaredProduct` after a customer moves to it. Product rollout must account
+for supported older app versions; guessing a tier could grant the wrong access.
 
-Composition is atomic, not failure-isolated. If one included group has a catalog
-mismatch, the typed projection for every included group becomes unavailable.
-Per-group availability would require a different public state model and is not
-provided by this API.
+## Transaction handling policy
+
+The catalog classifies each verified transaction before the delegate runs:
+
+- A **managed** transaction is a catalog-declared, metadata-valid
+  auto-renewable transaction. An undeclared upgraded transaction in the managed
+  group is also managed for finishing after its type and group are validated,
+  but it cannot grant typed access.
+- An **invalid** transaction is declared with the wrong type or group, is an
+  undeclared non-upgraded product inside the managed group, or is an undeclared
+  upgraded product in that group whose type is not `.autoRenewable`. It fails
+  before the delegate runs and is never finished.
+- An **unmanaged** transaction belongs outside the catalog, such as a
+  consumable, non-consumable, non-renewing subscription, or an auto-renewable
+  subscription in another group.
+
+The delegate decision is requested for managed and unmanaged transactions:
+
+- `.automatic` finishes a managed transaction and throws
+  `unhandledTransaction` for an unmanaged one. It is not unconditional finish.
+- `.finish` means the app has durably applied this business event, or its
+  idempotency ledger proves that the event was already applied. The framework
+  then calls `finish()`.
+- If `decidePolicy(for:)` throws, the framework does not call `finish()` and
+  does not run the causal entitlement refresh. A direct operation throws the
+  error; background-owned work reports it. A later independent StoreKit
+  delivery can present the exact revision again. The framework starts no timer
+  or backoff retry.
+
+There is no normal “keep unfinished” policy. StoreKit may still include an
+unfinished auto-renewable transaction in `Transaction.currentEntitlements`, so
+not calling `finish()` does not guarantee that access is withheld. A future
+deferral feature would need transaction suppression and a corresponding public
+availability state, not only another policy case. StoreKit purchase deferral is
+already represented by `StorePurchaseOutcome.pending`.
+
+The decision/notification split follows the same structure as
+`WKNavigationDelegate`: one method returns policy before a consequential action;
+the other reports a failure that has already occurred and returns no policy.
+Both requirements have defaults, so the delegate is optional and may implement
+only the behavior it owns.
+
+The protocol is class-bound and `Sendable`, but not actor-bound. Its public
+contract describes isolation requirements rather than prescribing whether a
+consumer uses an actor or a synchronized class.
+
+### Exact-revision ownership
+
+Direct purchase results, `Transaction.updates`, and `Transaction.unfinished`
+reconciliation attach to one causal decision receipt for an exact transaction
+revision. Coalesced deliveries share that receipt instead of repeating delegate
+work. The receipt stays active through policy, `finish()`, causal refresh, and
+ordered MainActor publication.
+
+After `finish()` succeeds, the exact revision enters a bounded process-local
+completed cache. The cache suppresses nearby duplicate deliveries but is not a
+durable business ledger. Eviction may allow the revision to be presented again,
+so every app-owned effect remains idempotent. Revision identity includes changes
+such as revocation; transaction ID alone is not sufficient.
+
+### Failure after a completed action
+
+If `process(_:)` finishes a transaction and its causal entitlement refresh then
+fails, it throws:
+
+```swift
+StoreTransactionError.entitlementRefreshFailed(
+    after: .finishedTransaction(transaction),
+    underlyingError: error
+)
+```
+
+The exact revision is already recorded as completed. The consumer must not
+reapply its business effect, repeat a purchase, or rerun `process(_:)` only to
+recover. Its next operation is `refreshEntitlements()`.
+
+`StorePurchaseOutcome.completed` is returned only after policy, finish, refresh,
+catalog projection, and atomic MainActor publication all complete. A
+post-finish refresh failure returns no outcome and throws the typed error above.
+
+If `AppStore.sync()` itself fails, `restorePurchases()` throws the original
+error. If synchronization succeeds and the following refresh fails, it throws
+`entitlementRefreshFailed(after: .synchronizedPurchases, underlyingError:)`.
+The consumer retries `refreshEntitlements()` rather than immediately presenting
+restore authentication again.
+
+The physical refresh coordinator completes with the root refresh or catalog
+error only. Each attached direct receipt adds its own completed-action context:
+a process receipt whose finish succeeded creates `.finishedTransaction`, a
+restore receipt whose sync succeeded creates `.synchronizedPurchases`, and a
+plain refresh receipt returns the root error unchanged. This remains correct
+when those callers coalesce into one physical batch.
+
+If the physical failure is background-owned, the entitlement-refresh background
+failure also stores the root error rather than one caller's completed-action
+wrapper. Observable `EntitlementStatus` stores that same root error because it
+explains readiness. Completed revisions and restore completion remain recorded
+by their respective operation owners.
 
 ## Fixed entitlement override
 
 `overridingEntitlements` is a composition-root choice, not mutable runtime
-state. The initializer consumes `some Sequence<Entitlement>`, normalizes it once
-to a `Set`, and publishes `.overridden` immediately. An array literal is the
-common spelling; an existing `Set` or another finite sequence is equally valid.
+state. The initializer consumes a finite sequence, normalizes it once to a
+`Set`, and publishes `.overridden` immediately. An empty sequence is an
+authoritative empty set; it does not select live StoreKit behavior.
 
-An empty sequence means “override with no active entitlement.” It is observably
-different from selecting the live initializer, which begins in `.loading`.
-There is no Boolean “unlock everything” form because the framework does not
-know the app's complete entitlement universe or inclusion policy.
+An override store:
 
-An override store has these contracts:
+- Starts no StoreKit source, monitor, query, or transaction processing.
+- Does not retain or invoke a delegate.
+- Publishes the normalized typed set and answers exact membership queries.
+- Keeps raw `entitlements == nil`; it invents no StoreKit snapshots.
+- Throws `operationUnavailableInOverride(operation:)` from every StoreKit
+  operation before starting work.
+- Makes `close()` successful and idempotent.
 
-- It does not create a StoreKit source, start update or status monitors, query
-  current entitlements, process transactions, retain a delegate, or invoke
-  delegate methods.
-- `activeEntitlements` is the normalized override set and
-  `isEntitled(to:)` performs exact membership against it.
-- `entitlements` is `nil`. The framework does not synthesize raw transactions
-  to make the override look like a verified StoreKit snapshot.
-- `process(_:)`, `refreshEntitlements()`, `history(for:)`, and
-  `restorePurchases()` throw
-  `StoreTransactionError.operationUnavailableInOverride(operation:)` before
-  starting any work.
-- `close()` is successful and idempotent even though no runtime work exists.
+The app owns whether a preview, internal build, TestFlight build, UI test, or
+another environment uses this initializer. There is no “unlock everything”
+Boolean because the framework does not know the app's complete entitlement
+universe.
 
-The override initializer does not accept a delegate; accepting one that can
-never receive a decision or notification would create a false contract. The app
-owns whether a preview, internal build, TestFlight build, UI test, or another
-environment uses this initializer. StoreTransactionKit does not inspect the
-receipt or build configuration to make that decision.
+The catalog remains an initializer argument so live and override composition
+share the same entitlement domain. No entitlement is reverse-mapped to a
+Product ID because several products can intentionally grant the same value.
 
-The catalog remains part of the initializer so the override uses the same
-`Entitlement` domain as the live store and the app has one composition shape.
-No Product ID is reverse-mapped from an entitlement: monthly and yearly
-products may intentionally grant the same value, so such a reverse mapping is
-not well-defined.
+## Atomic entitlement publication
 
-## Atomic publication owner
-
-Raw and typed entitlement values describe one StoreKit query and must commit
-together. Catalog projection and validation therefore run inside the entitlement
-refresh coordination boundary, after unfinished transactions have been handled
-and before any of the following occur:
-
-- Updating the coordinator's current snapshot.
-- Notifying the observable store.
-- Completing a refresh receipt successfully.
-- Returning a `StoreEntitlements` result to a caller.
-
-If a query or non-catalog transaction-handling error occurs before producing a
-verified candidate, the previous complete snapshot remains current. A catalog
-failure is different: the verified candidate contradicts the old typed
-projection. The coordinator clears its complete publication, the observable
-store becomes `.failed`, and both public projections become `nil`. Keeping the
-old typed set could continue granting a higher tier after a user has moved to an
-unknown lower-tier product.
-
-The coordinator reports every physical query batch to the observable state
-owner exactly once, before completing attached receipts:
+Raw and typed entitlement values describe one StoreKit query and commit
+together. Projection and validation run inside the entitlement refresh
+coordinator after unfinished processing and before any snapshot is exposed or
+any receipt completes.
 
 ```swift
 private struct EntitlementPublication<Entitlement>: Sendable
@@ -607,30 +594,9 @@ where Entitlement: Hashable & Sendable {
     case transientFailure(any Error)
     case catalogFailure(AutoRenewableSubscriptionCatalogError)
 }
-
-didComplete(
-    token: UInt64,
-    outcome: EntitlementRefreshOutcome<Entitlement>
-)
 ```
 
-For a coalesced batch, `didComplete.token` is the last reservation token in that
-batch. The coordinator delivers completions in physical token order. A single
-`TransactionStore` reducer owns all availability transitions; startup, direct,
-and background callers never write observable state themselves.
-
-`transientFailure` carries the normalized underlying error that belongs in
-`entitlementStatus`. Any internal reporting-owner wrapper remains available to
-receipts and reporting authority but does not leak into observable state.
-Diagnostic reporting is a separate ownership decision, so `didComplete` does
-not call `transactionStore(didFailWith:)`.
-
-Mapping in `TransactionStore.activeEntitlements` after raw publication would
-violate atomicity and is not part of the design.
-
-## Observable state
-
-The three public properties are separate views of one private state value:
+One reducer owns the public state:
 
 ```swift
 private enum EntitlementAvailability<Entitlement> {
@@ -645,176 +611,226 @@ private enum EntitlementAvailability<Entitlement> {
 ```
 
 `entitlementStatus`, `entitlements`, and `activeEntitlements` are computed from
-that value. The store never updates three independent stored properties. This
-prevents Observation from rendering combinations such as `.ready` with a `nil`
-typed set.
-
-The public meaning is:
+that value. There are no independently mutated mirror properties.
 
 | Status | `entitlements` | `activeEntitlements` | Meaning |
 | --- | --- | --- | --- |
 | `.loading` | `nil` | `nil` | No readiness attempt has completed. |
-| `.failed(error)` | `nil` | `nil` | No usable complete snapshot exists; inspect `error` for the reason. |
-| `.ready` | non-`nil` | non-`nil` | A complete raw and typed snapshot is available. Empty values mean no entitlement. |
-| `.overridden` | `nil` | non-`nil` | StoreKit is bypassed and the app-supplied typed set is authoritative. An empty set means no entitlement. |
-
-`.loading` is only the initial state of a live store. The store does not return
-to it for later refreshes. `.failed` means that no usable live snapshot exists;
-it does not mean that the most recent operation failed. `.overridden` is the
-only state of an override store.
+| `.failed(error)` | `nil` | `nil` | No usable complete snapshot exists. |
+| `.ready` | non-`nil` | non-`nil` | A complete live snapshot is available; empty means no entitlement. |
+| `.overridden` | `nil` | non-`nil` | The app-supplied set is authoritative; empty means no entitlement. |
 
 State transitions are:
 
 | Event | Result |
 | --- | --- |
-| Live initialization | `.loading` with both projections `nil`. |
-| Override initialization | `.overridden` with raw `entitlements == nil` and the normalized typed set. |
-| Any successful candidate | `.ready` with the new atomic snapshot. |
-| Query or non-catalog transaction-handling error while `.loading` or `.failed` | `.failed(error)` with both projections `nil`. |
-| Query or non-catalog transaction-handling error after `.ready` | Preserve the previous `.ready` snapshot. This includes a late startup failure after another refresh has already succeeded. |
-| Catalog failure in a verified candidate | `.failed(error)` with both projections `nil`, even after `.ready`; stale typed access is invalidated. |
-| Successful empty query | `.ready`; both collections are empty, not `nil`. |
-| Unverified current-entitlement element | Omit and report that element; publish the verified remainder if the query otherwise succeeds. |
-| Close | Preserve the last entitlement state; lifecycle errors are reported by operations, not by `EntitlementStatus`. Closing an override is an idempotent success. |
+| Live initialization | `.loading`. |
+| Override initialization | `.overridden` with the normalized set. |
+| Successful candidate | `.ready` with one new atomic snapshot. |
+| Query or transaction-handling failure with no prior snapshot | `.failed(error)`. |
+| Query or transaction-handling failure after `.ready` | Preserve the last `.ready` snapshot. |
+| Catalog failure | `.failed(error)` and clear both projections, even after `.ready`. |
+| Successful empty query | `.ready` with two empty collections. |
+| Unverified current-entitlement element | Omit it, report it, and publish the verified remainder. |
+| Close | Preserve the last entitlement state. |
 
-The current `startupError` property is removed. Its readiness role moves to
-`entitlementStatus`, while operational diagnostics continue through thrown
-errors and `transactionStore(didFailWith:)`.
+A catalog contradiction fails closed because preserving an older typed set could
+continue granting a higher tier after a move to an undeclared lower-tier
+product. A transient query failure preserves a known-good ready snapshot.
 
-SwiftUI calls `isEntitled(to:)` directly. It does not copy the set or status into
-`@State`, and normal app content does not wait for readiness. The method returns
-`true` when a ready or overridden set contains the requested entitlement. It
-returns `false` while loading, after a readiness failure, and when the available
-set does not contain the value. Code that needs to distinguish those reasons or
-identify the source reads `entitlementStatus`. `activeEntitlements` remains
-available for consumers that need the complete typed set.
+`isEntitled(to:)` performs exact membership in `.ready` and `.overridden`. It
+returns `false` while loading, after a readiness failure, or when the available
+set does not contain the value. Consumers inspect `entitlementStatus` only when
+they need to explain the reason.
 
-This is exact set membership. It does not infer that StoreKit group level 1
-contains level 2, or that one app entitlement includes another. If multiple plan
-identities grant one feature, the app expresses that policy by checking each
-accepted entitlement. The catalog continues to own only Product ID to app-value
-translation.
+## Failure routing and observability
 
-## Failure routing
+Failure delivery follows ownership of the physical work:
 
-Failure delivery depends on ownership of the operation, not only on the error
-type:
-
-| Failure | Observable state | Direct caller | Background notification |
+| Failure | Observable state | Direct caller | Background owner |
 | --- | --- | --- | --- |
-| Invalid source-defined catalog | Store is not created | None | `precondition` failure |
-| StoreKit operation requested from an override store | Preserve `.overridden` | Throw `operationUnavailableInOverride(operation:)` | None |
-| Startup query or non-catalog transaction-handling error | Become `.failed` if no snapshot exists; otherwise preserve `.ready` | No startup caller | Notify once when no other physical-work owner already reports it |
-| Startup catalog failure | `.failed(error)` and invalidate any previous projection | No startup caller | Notify once when no other physical-work owner already reports it |
-| Explicit query or non-catalog transaction-handling error | Become or remain `.failed` without a snapshot; otherwise preserve `.ready` | Throw underlying error | Do not duplicate while a caller owns it |
-| Explicit catalog failure | `.failed(error)` and invalidate any previous projection | Throw underlying error | Do not duplicate while a caller owns it |
-| Background query or non-catalog transaction-handling error after `.ready` | Preserve `.ready` snapshot | None | Notify once through `transactionStore(didFailWith:)` |
-| Background catalog failure | `.failed(error)` and invalidate any previous projection | None | Notify once through `transactionStore(didFailWith:)` |
-| Current-entitlement verification failure for one element | Publish verified remainder | Attached operation may still succeed | Notify once for the omitted element |
+| Invalid static catalog | Store is not created | None | `precondition` failure |
+| StoreKit operation in override mode | Preserve `.overridden` | Throw `operationUnavailableInOverride` | None |
+| Explicit query or handling failure | Fail or preserve according to the state table | Throw | No duplicate report while attached |
+| Startup or background query/handling failure | Fail or preserve according to the state table | None | Record and optionally notify once |
+| Explicit catalog failure | Invalidate projections | Throw | No duplicate report while attached |
+| Startup or background catalog failure | Invalidate projections | None | Record and optionally notify once |
+| Current-entitlement verification failure | Publish verified remainder | Attached operation may succeed | Record and optionally notify once |
+| Post-finish or post-sync refresh failure | Apply the underlying refresh transition | Throw typed completed-action error | Record and optionally notify once when background-owned |
 
-A catalog projection error participates in the same physical-work ownership and
-coalescing rules as a StoreKit query error, but its observable-state transition
-is intentionally fail-closed. Background-owned catalog failures use
-`StoreTransactionBackgroundFailure.Source.entitlementRefresh` with the public
-`AutoRenewableSubscriptionCatalogError` as `underlyingError`.
+Every physical batch has one reporting authority. Direct participation is bound
+at admission, before work can fail. If any attached direct caller receives the
+error, it is not also a background failure. If all direct callers abandon the
+work, ownership transfers to the background authority and the error is reported
+once.
 
-Reservation role alone does not decide whether to report. Every startup,
-background, and direct reservation in one physical batch shares one reporting
-authority. Direct participation is registered as part of `reserve`, before the
-worker can start, so a fast failure cannot race a later observer binding.
+Every background-owned failure is first recorded through a package-owned
+unified `Logger`, whether or not a delegate exists. A supplied delegate then
+receives the same failure through `didFail(with:)`. Internal logging is
+best-effort observability: it cannot change policy or completion, has no public
+injection surface, and never records JWS data. Direct errors returned to an
+attached caller are not logged as background failures.
 
-The authority collects one background report candidate and all direct-caller
-dispositions, then decides once:
+For a failure that changes observable entitlement state, the reducer commit
+completes before logging and before `didFail(with:)` begins. A delegate may
+therefore inspect the corresponding state, but it cannot alter that state or
+request retry by returning a value.
 
-- If any attached direct caller receives the error, no background diagnostic is
-  sent.
-- If every direct caller abandons the work, one background diagnostic is sent.
-- If no direct caller participated, the startup or background physical work
-  sends one diagnostic.
+Background notifications are serialized with backpressure. Decisions are also
+serialized, but decision and notification delivery are independent and may
+overlap. `close()` drains both.
 
-This is independent of whether background or direct work reserved first. State
-completion still occurs exactly once through `didComplete`.
+## Product-type boundary
 
-## Product-type boundaries
+`AutoRenewableSubscriptionCatalog` maps only auto-renewable subscriptions:
 
-`AutoRenewableSubscriptionCatalog` is intentionally specific:
+- Non-consumables and non-renewing subscriptions may appear in raw
+  `StoreEntitlements` but do not produce typed catalog entitlements.
+- Consumables never appear in `Transaction.currentEntitlements`; they still
+  reach transaction handling. An app that owns a consumable balance supplies a
+  delegate and returns `.finish` only after applying that balance durably.
+- `.automatic` rejects every unmanaged product, so the default path never
+  finishes a product with no business-effect owner.
 
-- Auto-renewable subscriptions are mapped by group and Product ID.
-- Non-consumables may appear in raw `StoreEntitlements`, but this catalog does
-  not map them to typed app access.
-- Non-renewing subscriptions may appear in raw current entitlements even after
-  their intended service period; app-owned expiry policy is outside this
-  catalog.
-- Consumables never appear in `Transaction.currentEntitlements`. They still pass
-  through the transaction decision path. An app that owns a consumable balance
-  supplies a delegate and returns `.finish` only after updating that balance
-  durably.
-
-`TransactionStore` remains the single process-wide transaction monitor and
-finish authority across product types. The product-specific catalog changes
-typed projection and automatic handling; it does not create a second StoreKit
-listener. `.automatic` fails for every transaction outside this catalog, so an
-app must provide the handling owner before it can finish one.
-
-If a concrete consumer later needs typed non-consumable access, it requires a
-separate design. It must not be represented as a member of
-`AutoRenewableSubscriptionGroup`, because StoreKit does not model it that way.
+`TransactionStore` remains the process-wide transaction monitor and finish
+authority across product types. A future typed non-consumable catalog is a
+separate design, not another member of `AutoRenewableSubscriptionGroup`.
 
 ## Ownership map
 
 | Responsibility | Owner |
 | --- | --- |
-| Group ID, Product ID cases, and Product ID to app-entitlement mapping | App-defined `AutoRenewableSubscriptionGroup` conformance |
-| Choosing whether a particular app composition bypasses StoreKit | App composition root |
-| Normalized lookup, managed-group membership, and catalog validation | `AutoRenewableSubscriptionCatalog` |
-| Normalizing and publishing a fixed override set | `TransactionStore` override initializer and availability reducer |
-| StoreKit query and unfinished-transaction reconciliation | `CurrentEntitlementReconciler` |
-| Exact-revision admission, causal decision receipts, and policy completion | Transaction processing coordinator |
-| Candidate projection, atomic publication, refresh coalescing, ordered completion, and receipt completion | Generic entitlement refresh coordinator |
-| Observable availability reducer and process-lifetime facade | `TransactionStore` |
-| Direct/background reporting authority and exactly-once diagnostic delivery | Runtime pipeline and failure notification dispatcher |
-| Default handling for validated auto-renewable transactions | `AutoRenewableSubscriptionCatalog` classification and `.automatic` policy |
-| Optional durable business effect, idempotency, and handling policy | App `TransactionStoreDelegate` |
-| Product merchandising and subscription status presentation | App using StoreKit directly |
-| Synthetic source, command admission, action acknowledgement, and test lifecycle | `withTransactionStoreTestHarness` and its `TransactionStoreTestHarness` in `StoreTransactionKitTesting` |
-| Time policy in app tests | The app component that performs the timed work, through an injected `Clock` |
-| Virtual time and sleeper-registration barriers | `TransactionStoreTestClock` in `StoreTransactionKitTesting` |
+| Group ID, Product IDs, and Product ID to app-entitlement mapping | App-defined `AutoRenewableSubscriptionGroup` |
+| Catalog lookup and verified metadata validation | `AutoRenewableSubscriptionCatalog` |
+| Choosing live or override mode | App composition root |
+| Fixed override normalization and publication | `TransactionStore` availability owner |
+| StoreKit query and unfinished reconciliation | `CurrentEntitlementReconciler` |
+| Exact-revision admission, decision receipt, and completed cache | Transaction processing coordinator |
+| Projection, refresh coalescing, ordered completion, and atomic publication | Entitlement refresh coordinator |
+| Observable availability | `TransactionStore` reducer |
+| Process-wide live-monitoring lease, admission, and shared close completion | Non-generic internal lifecycle authority |
+| Exactly-once direct/background failure selection | Runtime reporting authority |
+| Unified background logging | Runtime reporting authority and package logger |
+| App-specific policy, durable effect, and failure reaction | App `TransactionStoreDelegate` |
+| Product merchandising and subscription-status presentation | App using StoreKit directly |
+| Synthetic source, command receipt, and test lifecycle | `StoreTransactionKitTesting` harness |
+| Timed app behavior | The app component with an injected `Clock` |
+| Virtual time and sleep-registration barriers | `TransactionStoreTestClock` |
 
-No UI type owns semantic entitlement state. No second mapping is performed in a
-view, delegate method, or computed property outside the catalog owner.
+No UI type owns semantic entitlement state, and no second Product ID mapping is
+performed outside the catalog.
 
 ## Lifecycle and concurrency
 
-- `TransactionStore` remains `@MainActor`, `@Observable`, and process-owned.
-- `AutoRenewableSubscriptionCatalog` is immutable and `Sendable` after
-  normalization. Its storage uses value semantics rather than shared mutable
-  storage or `@unchecked Sendable`.
-- App-defined `Entitlement` values cross concurrency boundaries and must be
-  `Hashable & Sendable`.
-- Group types and typed Product IDs are consumed synchronously during catalog
-  construction and do not cross concurrency boundaries.
-- A live store starts monitoring during initialization and retains the catalog
-  for every entitlement projection.
-- A live store strongly retains an app delegate when supplied. Without one, it
-  uses `.automatic` and has no app-specific failure receiver. Transaction
-  decisions are serialized. Failure notifications are also serialized, but
-  decision and notification delivery are independent and may overlap.
-- An override store starts no asynchronous task. Its normalized entitlement set
-  is immutable for the store's lifetime, and `close()` is idempotent.
-- `close()` stops new admission and waits for every admitted delegate decision
-  and failure notification to return. A direct call, or a `Task {}` call, that
-  inherits the delegate's callback context and starts an admission-bearing store
-  operation fails with
-  `reentrantOperation(operation:)`.
-- `Task.detached` does not inherit task-local callback context, so the framework
-  cannot identify that call as delegate-originated. Awaiting detached work that
-  calls the same store is still unsupported because it can create the same
-  dependency cycle. Actor isolation, `@isolated(any)`, `sending`,
-  `SendableMetatype`, and `@_inheritActorContext` do not encode parent-task
-  ancestry or make an instance method unavailable only to detached tasks.
-- A process-wide “delegate callback is active” gate is not used to simulate that
-  provenance. It would also reject unrelated UI or lifecycle operations that
-  happen to overlap a suspended delegate callback.
+### Live-store lease
+
+The live initializer synchronously acquires one process-wide exclusive lease
+before retaining a delegate or creating a StoreKit producer. A second live
+initializer while that lease is active is a precondition failure. The lease is
+shared across every generic specialization of `TransactionStore`.
+
+The lease is held by a non-generic internal lifetime authority, not only by the
+observable facade. `close()` releases it after terminal shutdown. Override
+stores and synthetic stores created by `StoreTransactionKitTesting` do not
+acquire it because they neither monitor live StoreKit sequences nor own live
+`finish()` authority.
+
+Dropping a store is not an awaitable replacement protocol. Code that needs a
+different live store first awaits `close()`.
+
+### Admission and cancellation
+
+Each admission-bearing operation — `process(_:)`, `refreshEntitlements()`,
+`history(for:)`, and `restorePurchases()` — checks cancellation immediately
+before acquiring its operation lease. Successful lease acquisition is the
+admission boundary.
+
+- Cancellation before admission throws `CancellationError` and starts no
+  operation-specific StoreKit work.
+- Cancellation after admission abandons only that caller's wait. The physical
+  decision, finish, refresh, publication, and failure routing continue to
+  terminal completion.
+- If the cancelled caller was the last direct observer of a later failure, that
+  failure becomes background-owned and is reported once.
+- `.pending` and `.userCancelled` results create no durable transaction work and
+  check cancellation before returning.
+- `close()` is the exception: it begins or joins terminal shutdown even when the
+  caller is already cancelled, and every caller waits for the shared completion.
+
+Admission-bearing operations accepted while running complete. New
+admission-bearing operations after shutdown has been sealed throw `.closing`;
+after terminal completion they throw `.closed`. Repeated `close()` calls still
+succeed, and the last observable entitlement state remains readable.
+
+### Delegate reentrancy
+
+The store strongly retains its delegate until terminal shutdown. A delegate
+that references the store must hold that reference weakly.
+
+A delegate must not start an admission-bearing operation on the same store from
+either callback. Inherited callback context lets the runtime reject direct calls
+and `Task {}` child calls with
+`reentrantOperation(operation:)`. `Task.detached` intentionally drops task-local
+context, so Swift's actor isolation, `@isolated(any)`, `sending`,
+`SendableMetatype`, and actor-context inheritance cannot prove that detached
+call's ancestry. Starting a detached operation remains unsupported whether or
+not the callback awaits it: awaiting can create a dependency cycle, while
+fire-and-forget work escapes callback ownership. The contract does not claim
+detached provenance is detectable.
+
+A process-wide “callback active” gate is not used because it would reject
+unrelated operations that merely overlap a suspended callback.
+
+### Shared close
+
+The first accepted `close()` publishes one shared, noncancellable completion
+before suspending. Concurrent callers join it; calls after closure return
+successfully without effect.
+
+Before awaiting `AsyncSequence.next()`, each live producer acquires an iteration
+lease. Sealing producer admission prevents a new `next()` call but does not
+invalidate a lease already waiting for or handling an element. If an element is
+returned while close races with that wait, the producer hands it to a processing
+coordinator-owned, noncancellable terminal receipt before observing cancellation
+and waits for that receipt without propagating producer cancellation into it.
+Producer task cancellation interrupts the sequence wait, not physical work
+admitted from a returned element.
+
+Terminal shutdown executes in this order:
+
+1. Transition to `closing`; seal public-operation admission and new producer
+   iteration admission.
+2. Cancel the startup waiter and StoreKit producer tasks.
+3. Await producer termination; callbacks admitted before sealing remain
+   admitted.
+4. Await every admitted direct operation, decision, `finish()`, entitlement
+   refresh, ordered publication, and causal receipt.
+5. Seal and drain background-failure delivery.
+6. Release the strongly retained delegate.
+7. Release the live-store lease and enter `closed`.
+
+After `close()` returns, no framework-owned task, StoreKit producer, delegate
+invocation, or publication from that store remains active. The last entitlement
+state remains readable.
+
+Calling `close()` from a callback owned by the same store throws
+`reentrantOperation(operation: .close)` because waiting for that callback is
+part of close completion.
+
+### Deinitialization backstop
+
+`TransactionStore` uses `isolated deinit` only for synchronous containment. It
+must synchronously seal public and producer admission, then signal cancellation
+to startup, producers, and finite framework tasks. It does not start an
+unstructured cleanup task, await callbacks, claim shutdown completion, or
+release the live lease directly.
+
+Runtime-owned work retains the lifetime token until every task admitted before
+that seal terminates. Deinitialization does not promise a successful drain;
+admitted work may instead reach terminal cancellation and background-failure
+routing. Constructing another live store immediately after dropping an unclosed
+one may therefore still fail the lease precondition. Explicit `close()` is the
+only awaitable replacement boundary.
 
 ## Deterministic consumer testing
 
@@ -826,13 +842,10 @@ StoreTransactionKitTesting
 StoreTransactionKit
 ```
 
-Production targets import only `StoreTransactionKit`. App test targets import
-`StoreTransactionKitTesting`, which builds a real `TransactionStore` around a
-package-scoped synthetic StoreKit source. The production module owns the
-transaction pipeline, catalog projection, availability reducer, and public
-store type; the testing module does not reimplement any of them.
-
-The initial testing surface is:
+Production targets import `StoreTransactionKit`. Test targets may import
+`StoreTransactionKitTesting`, which creates a real `TransactionStore` around a
+package-scoped synthetic source. It does not reimplement transaction handling,
+catalog projection, or observable state.
 
 ```swift
 public final class TransactionStoreTestClock: Clock, Sendable {
@@ -870,15 +883,34 @@ public final class TransactionStoreTestClock: Clock, Sendable {
 public final class TransactionStoreTestHarness<Entitlement>
 where Entitlement: Hashable & Sendable {
     public let store: TransactionStore<Entitlement>
-    public private(set) var reportedFailures:
-        [StoreTransactionBackgroundFailure] { get }
 
     @discardableResult
     public func purchase<Group>(
         _ productID: Group.ProductID,
         in groupType: Group.Type
-    ) async throws -> StorePurchaseOutcome
+    ) async throws -> StoreTransactionSnapshot
     where Group: AutoRenewableSubscriptionGroup<Entitlement>
+}
+
+public enum TransactionStoreTestHarnessError:
+    LocalizedError,
+    Sendable,
+    Hashable
+{
+    case subscriptionGroupMismatch(
+        expected: SubscriptionGroupID,
+        actual: SubscriptionGroupID
+    )
+    case subscriptionGroupTypeMismatch(
+        subscriptionGroupID: SubscriptionGroupID
+    )
+    case undeclaredProduct(
+        productID: String,
+        subscriptionGroupID: SubscriptionGroupID
+    )
+    case operationUnavailable(operation: StoreTransactionOperation)
+
+    public var errorDescription: String? { get }
 }
 
 @MainActor
@@ -892,99 +924,84 @@ public func withTransactionStoreTestHarness<Entitlement, Result>(
 where Entitlement: Hashable & Sendable
 ```
 
-The harness does not accept a Clock. None of the production work it drives owns
-a delay, deadline, retry interval, or other time policy, so injecting a Clock
-there would be unused ceremony. When `delegate` is omitted, the common
-no-subscription → purchase → entitled test uses `.automatic`, which resolves to
-finish for the catalog-validated synthetic subscription, and relies on the
-command's causal receipt. Supplying a delegate exercises an app's real durable
-effect and policy decision.
+The scoped function owns construction and cleanup. It closes and drains the
+store before returning on success, failure, or cancellation, then rethrows the
+operation error. A retained harness value is already closed after the scope.
 
-`withTransactionStoreTestHarness` is the public construction and lifecycle
-boundary. It initializes the harness, invokes `operation`, and drains and closes
-framework-owned work before returning on success, failure, or cancellation. If
-`operation` throws, its error is rethrown after cleanup. Harness construction
-and mandatory final cleanup remain module-owned, so a test cannot forget
-cleanup. A harness value retained beyond the closure is already closed.
+Construction completes an empty synthetic entitlement query before invoking the
+closure, so the initial state is `.ready` with empty raw and typed collections.
+The harness validates that the supplied group and Product ID belong to the
+catalog. It accepts a Product ID rather than an entitlement because an
+entitlement cannot be reverse-mapped to one monthly or yearly product.
 
-The module-owned cleanup path is nonthrowing and invokes cleanup from the scope
-task rather than from a store delegate callback. A test may call the public
-`harness.store.close()` earlier; final cleanup then relies on the store's
-idempotent close contract. Public `TransactionStore.close()` keeps its
-reentrancy error for general lifecycle owners; that error is not part of the
-scoped testing API's final cleanup.
+A group whose ID differs from the catalog throws
+`subscriptionGroupMismatch(expected:actual:)`. A different group declaration
+that reuses the same ID throws
+`subscriptionGroupTypeMismatch(subscriptionGroupID:)`; the catalog declaration
+and mapping remain authoritative. A raw Product ID absent from that declaration
+throws `undeclaredProduct(productID:subscriptionGroupID:)`. All checks complete
+before synthetic transaction admission, invoke no delegate method, and leave
+state unchanged.
 
-`TransactionStoreTestClock` is a separate testing primitive for the component
-that actually owns a time dependency, such as an app transaction delegate or
-ViewModel. That component accepts `any Clock<Duration>` using Swift's
-primary-associated-type syntax. The test retains the concrete clock so it can
-observe registered sleepers and advance virtual time. The clock uses
-synchronized checked storage, such as `Synchronization.Mutex`; its synchronous
-`Clock` requirements are not actor-isolated. Its independent virtual `Instant`
-cannot be mixed with a `ContinuousClock.Instant` deadline.
+`purchase(_:,in:)` returns only after:
 
-The test harness consumes the nested typed Product ID and the group type. It
-validates that the group is present in the supplied catalog, then uses the
-catalog's normalized raw Product ID and group ID. It never accepts an
-`Entitlement` as a purchase command because mapping an entitlement back to one
-monthly or yearly Product ID is not defined. Direct entitlement sets belong to
-the fixed override initializer, not the full-pipeline harness.
+1. The synthetic transaction is admitted through the production direct path.
+2. The delegate or `.automatic` resolver returns a policy.
+3. The synthetic transaction is acknowledged as finished.
+4. Current synthetic entitlements are reconciled and projected.
+5. `TransactionStore` publishes the resulting state on `@MainActor`.
 
-Initialization completes an empty current-entitlement query before returning.
-The initial public state is therefore `.ready` with empty raw and typed
-collections, not a racing `.loading` state. A test that needs to inspect loading
-or failure transitions uses a lower-level package contract test rather than
-adding timing hooks to app code.
+It returns the completed `StoreTransactionSnapshot` only after that receipt
+completes. Pre-admission harness validation and delegate decision failures throw
+directly and are not duplicated as background failures. A refresh or projection
+failure after synthetic acknowledgement follows the production
+`entitlementRefreshFailed(after: .finishedTransaction(...))` contract.
+Supplying a delegate tests the app's real policy decision; the harness does not
+add a second public failure-capture state.
 
-The initial public command surface contains only `purchase`. Expiration and
-revocation are not aliases for removing a Product ID from the fake current set:
-a natural expiration is a status/current-entitlement transition, while a
-revocation is a revised durable transaction delivery. Each needs an explicit
-transaction-identity, delegate-policy, finish, and missing-active-transaction
-contract before it can become public.
+A later `purchase` of another Product ID in the same group removes the prior
+snapshot from the synthetic current-entitlement set before the new causal
+refresh. It neither retains that snapshot nor marks it `isUpgraded`. This
+supports a deterministic tier1-to-tier2 ViewModel test while explicitly
+modeling only an immediately effective active product, not App Store scheduling
+or metadata for upgrades, downgrades, renewals, or billing retry. Expiration,
+revocation, and superseded-transaction projection remain app-hosted or
+package-level StoreKit scenarios until they have independent public command
+contracts.
 
-### Causal action acknowledgement
+The harness exposes no “wait until globally idle”: monitoring tasks are
+long-lived, so global quiescence is not meaningful. Each mutating command is its
+own completion receipt and does not promise a SwiftUI render pass or completion
+of consumer-owned unstructured tasks.
 
-Every mutating harness method is its own completion receipt. For example,
-`purchase(_:,in:)` returns only after all work caused by that command has
-completed:
+### Synthetic store operation matrix
 
-1. The synthetic transaction is admitted to the source.
-2. The command attaches a direct-operation receipt and reporting authority to
-   the production runtime rather than yielding through the background update
-   stream.
-3. The delegate or default resolver produces a policy; throwing terminates the
-   command through the failure-routing contract.
-4. `.automatic` resolves from catalog classification. A resolved or explicit
-   `.finish` acknowledges the synthetic transaction; `.keepUnfinished` leaves it
-   available to a later attempt.
-5. Current entitlements are queried and reconciled without deciding the same
-   exact revision again in this causal attempt.
-6. The subscription catalog validates and projects the candidate.
-7. `TransactionStore` commits the resulting availability on `@MainActor`.
+The harness exposes its `TransactionStore` so production ViewModels use their
+real dependency. That does not give the lease-exempt synthetic store live
+StoreKit authority:
 
-The command returns `.completed(transaction)` for resolved or explicit
-`.finish`, and `.keptUnfinished(transaction)` for `.keepUnfinished`. Both
-outcomes are returned after MainActor publication, so a ViewModel property
-computed directly from `store.isEntitled(to:)` can be read immediately. A
-thrown delegate or automatic-handling error instead fails the command and
-produces neither outcome. The receipt does not guarantee a SwiftUI render pass
-or completion of an unstructured consumer `Task` launched by an observation
-callback; that work needs its own owner-provided acknowledgement.
+| Store surface | Synthetic behavior |
+| --- | --- |
+| Entitlement properties and `isEntitled(to:)` | Read the production availability reducer. |
+| `refreshEntitlements()` | Reconcile and publish the synthetic current-entitlement set. |
+| `close()` | Drain the synthetic runtime; repeated calls succeed. |
+| `process(_:)` | Throw `operationUnavailable(operation: .processPurchase)` before inspecting or finishing a live transaction. |
+| `history(for:)` | Throw `operationUnavailable(operation: .history)` before source work. |
+| `restorePurchases()` | Throw `operationUnavailable(operation: .restorePurchases)` without calling `AppStore.sync()`. |
 
-The harness does not expose “wait until globally idle.” StoreKit-style monitors
-are intentionally long-lived, so process-wide quiescence is not a meaningful
-state. A future batch API may expose a cutoff receipt for commands admitted
-before a sequence number, but it must not define completion as all producer
-tasks exiting.
+`purchase(_:,in:)` is the only public synthetic mutation command in the initial
+surface. Unsupported store operations leave state unchanged and do not invoke
+the delegate. A synthetic purchase exercises the production finish-decision
+boundary against a synthetic acknowledgement; it never calls
+`Transaction.finish()` on a live StoreKit value.
 
 ### Clock contract
 
-The Clock controls a real time-dependent suspension in the code under test; it
-does not manufacture completion for an otherwise immediate harness command.
-For example, an app can inject `any Clock<Duration>` into its transaction
-delegate. The test supplies `TransactionStoreTestClock`, retains the concrete
-value, and synchronizes advancement with its explicit registration barrier:
+The harness itself accepts no Clock because its production transaction work has
+no delay, timeout, or retry policy. `TransactionStoreTestClock` is injected into
+the app component that owns time, such as a delegate or ViewModel. Clock
+advancement releases sleepers; the purchase receipt still proves entitlement
+publication.
 
 ```swift
 final class DelayedTransactionDelegate: TransactionStoreDelegate {
@@ -994,8 +1011,8 @@ final class DelayedTransactionDelegate: TransactionStoreDelegate {
         self.clock = clock
     }
 
-    func transactionStore(
-        decidePolicyFor transaction: StoreTransactionSnapshot
+    func decidePolicy(
+        for transaction: StoreTransactionSnapshot
     ) async throws -> StoreTransactionHandlingPolicy {
         try await clock.sleep(for: .seconds(30))
         return .finish
@@ -1004,6 +1021,7 @@ final class DelayedTransactionDelegate: TransactionStoreDelegate {
 
 let clock = TransactionStoreTestClock()
 let delegate = DelayedTransactionDelegate(clock: clock)
+
 try await withTransactionStoreTestHarness(
     subscriptionCatalog: subscriptionCatalog,
     delegate: delegate
@@ -1018,7 +1036,6 @@ try await withTransactionStoreTestHarness(
     }
 
     try await clock.waitUntilPendingSleepCount(reaches: 1)
-
     #expect(!viewModel.canExportPDF)
 
     clock.advance(by: .seconds(30))
@@ -1028,188 +1045,125 @@ try await withTransactionStoreTestHarness(
 }
 ```
 
-`waitUntilPendingSleepCount(reaches:)` returns when at least that many pending
-sleeps have registered. This is the same boundary as waiting until a dependency
-has reached its controlled suspension point before asserting intermediate
-state. The implementation uses an awaitable continuation-backed barrier rather
-than a fixed sleep or a guessed number of `Task.yield()` calls. Cancelling the
-barrier throws `CancellationError`.
+The registration barrier is continuation-backed; tests do not use fixed sleeps
+or guessed `Task.yield()` counts. Negative clock advances and negative sleeper
+counts are programmer errors. Cancelling a sleeper removes it and throws
+`CancellationError` according to the `Clock` contract.
 
-Advancing the Clock only makes due sleepers runnable; `purchase.value` remains
-the pipeline receipt. Negative clock advances and negative sleeper counts are
-programmer errors and fail immediately. Cancelling a sleeping task removes its
-sleeper and throws `CancellationError` according to the standard Clock
-contract.
-
-### Harness lifecycle and coverage boundary
-
-The scoped function stops command admission and drains already admitted work
-before closing the underlying store. Cancellation of the task awaiting an
-already admitted command does not silently cancel durable transaction decisions;
-scope cleanup still establishes terminal completion. The scope drains only
-framework-owned work. A consumer task started inside `operation` remains owned
-by that operation and must reach its own terminal state before the closure
-returns.
-
-The harness captures background failures in `reportedFailures` and forwards
-explicit command errors to the command caller without also appending them as a
-background failure. To preserve that ownership rule, `StoreTransactionKit`
-exposes a package-scoped Session/TransactionStore seam that stages the synthetic
-current state and delegates the command to the runtime's attached direct
-`process(_:leases:)` path. It does not use `StoreTransactionSource.runUpdates`
-for explicit commands. The harness's forwarding delegate captures background
-notifications and, when supplied, forwards decisions and notifications to the
-app delegate. No public raw transaction-source protocol or fake
-`TransactionStore` is required.
-
-This layer proves the app catalog, StoreTransactionKit pipeline, and consumer
-state integration. The app-hosted `.storekit` suite remains the owner of the
-live StoreKit adapter, verification results, StoreKit Test session behavior,
-and system integration.
+The public harness initially exposes only `purchase(_:,in:)` as a synthetic
+mutation command. App-hosted `.storekit` tests remain responsible for the live
+StoreKit adapter, verification, StoreKit Test session behavior, renewal
+scheduling, restore UI, history, expiration, and revocation.
 
 ## Required contract tests
 
-### Catalog tests
+### Catalog and state
 
-- Every declared monthly and yearly Product ID maps to its expected entitlement.
-- Multiple groups compose into one catalog without type erasure at the call site.
-- `including(_:)` does not change the original catalog or share mutable storage.
-- An empty `SubscriptionGroupID` fails when the ID value is constructed.
-- Empty Product IDs, empty groups, duplicate group IDs, and duplicate Product
-  IDs fail during catalog construction.
-- Duplicate entitlement values remain valid.
-- Each `AutoRenewableSubscriptionCatalogError.errorDescription` identifies the
-  Product ID and relevant expected or actual metadata.
-- Known Product ID with a wrong product type fails projection.
-- Known Product ID with a wrong or missing group ID fails projection.
-- Unknown non-upgraded Product ID inside a managed group fails projection.
-- Unknown Product ID outside managed groups remains raw and is ignored by the
-  typed set.
-- A catalog mismatch in one included group fails the complete composed
-  projection.
-- Known and unknown upgraded transactions remain raw, do not require a current
-  catalog entry, and do not grant typed access.
+- Every monthly and yearly Product ID maps to its expected entitlement.
+- Empty group IDs, Product IDs, and Product ID case sets fail at construction.
+- Duplicate raw Product IDs fail; duplicate entitlement values remain valid.
+- Known Product IDs with a wrong type or group fail projection.
+- An undeclared non-upgraded Product ID in the managed group fails projection.
+- An undeclared upgraded Product ID in the managed group with a non-auto-
+  renewable type fails with `productTypeMismatch` before delegate policy.
+- An external-group Product ID remains raw and does not enter the typed set.
+- An upgraded managed-group transaction remains raw, grants no typed access,
+  and can be handled without retaining a retired Product ID declaration.
+- Initial live state, ready-empty state, failed state, and override-empty state
+  preserve the state table's `nil` distinctions.
+- Every publication changes raw state, typed state, and status atomically.
+- Catalog contradictions clear stale access; transient refresh failures preserve
+  an earlier ready snapshot.
+- `isEntitled(to:)` is observed through the single availability owner and uses
+  exact membership.
 
-### State-owner tests
+### Processing, failure routing, and lifecycle
 
-- Initial state is `.loading` with both projections `nil`.
-- Override initialization publishes `.overridden`, leaves raw `entitlements`
-  `nil`, and normalizes duplicate input values into one typed set.
-- An empty override sequence publishes `.overridden` with an empty, non-`nil`
-  `activeEntitlements` set.
-- Override membership queries return exact set membership.
-- Every StoreKit-specific operation on an override store throws
-  `operationUnavailableInOverride(operation:)` without changing state or
-  invoking a delegate method; repeated `close()` calls succeed.
-- A successful empty query produces `.ready` and two empty collections.
-- Startup query, transaction-handling, and catalog failures produce `.failed`
-  without a partial candidate snapshot when no earlier query has succeeded.
-- A later success recovers `.failed` to `.ready` atomically.
-- A late startup query failure after a background success preserves `.ready`.
-- Explicit and background query or transaction-handling errors after `.ready`
-  preserve the previous raw and typed snapshot.
-- A verified known-tier to unknown-tier change produces `.failed`, clears both
-  public projections, and makes `isEntitled(to:)` return `false`.
-- A coalesced catalog failure does not publish a partial raw or typed snapshot.
-- Observation never publishes a status/projection combination outside the state
-  table.
-- `withObservationTracking` observes `isEntitled(to:)` through the private
-  availability value.
-- `isEntitled(to:)` returns `false` for `.loading`, `.failed`, and an available
-  set without the value, and `true` for a matching ready or overridden
-  entitlement.
+- `.automatic` finishes only a validated managed auto-renewable transaction.
+- `.finish` is the only app-selected path to finish an unmanaged transaction.
+- A thrown decision performs no finish or causal refresh and is redeliverable.
+- A post-finish refresh failure records the revision as completed, throws
+  `entitlementRefreshFailed(after: .finishedTransaction(...))`, and recovers via
+  `refreshEntitlements()` without repeating policy or finish.
+- A sync failure throws its original error; a post-sync refresh failure throws
+  the completed-operation error and recovers without repeating sync.
+- When process, restore, and plain refresh receipts coalesce on one failed
+  physical refresh, each direct caller receives its own wrapper or root error;
+  an abandoned batch produces one background report containing the root error.
+- `StorePurchaseOutcome.completed` is returned only after MainActor publication.
+- Completed-revision suppression is bounded and never substitutes for an app
+  ledger.
+- Coalesced direct, update, and unfinished deliveries decide one exact revision
+  once per active receipt.
+- Direct errors are not duplicated as background logs or notifications; an
+  abandoned direct failure transfers to the background owner once.
+- Every background failure reaches the internal diagnostic sink once even with
+  no delegate. A supplied delegate receives it after the related state commit.
+- The store retains its delegate until close drains decisions and notifications.
+- Direct and inherited child-task callback reentry is rejected. Detached reentry
+  is documented as unsupported without claiming provenance detection.
+- A second live initializer fails across different `Entitlement` types.
+- Override and multiple synthetic stores do not consume the live lease.
+- Close seals admission before producer shutdown, joins concurrent callers,
+  ignores waiter cancellation, and releases the lease only after complete drain.
+- A producer holding an iteration lease before `next()` processes an element
+  returned concurrently with close; no later iteration begins after the seal,
+  and close waits for its policy, finish, refresh, and publication.
+- Close completion guarantees no later framework task, callback, or publication.
+- Cancellation before admission starts no work; cancellation after admission
+  detaches the caller and lets the operation complete under background ownership.
+- Deinit cancellation retains the live lease until runtime termination.
 
-### Coordination and reporting tests
+### Testing and distribution
 
-- `.automatic` calls StoreKit `finish()` only for a catalog-validated managed
-  transaction; an explicit `.finish` is the only other path to `finish()`.
-- `.automatic` also finishes an upgraded transaction in a managed group after
-  validating `.autoRenewable`, without requiring its retired Product ID to
-  remain declared or granting typed access.
-- `.automatic` throws `unhandledTransaction` for every unmanaged product, while
-  invalid catalog metadata for a non-upgraded transaction fails before the
-  delegate is called. Neither path finishes the transaction.
-- Completed-revision suppression is bounded; an evicted exact revision can be
-  decided again and therefore still requires app-level idempotency.
-- `.keepUnfinished` calls neither `finish()` nor
-  `transactionStore(didFailWith:)`, returns `.keptUnfinished` to a direct
-  caller, and still completes the causal entitlement publication.
-- A revision kept unfinished is decided at most once while its causal receipt is
-  active across direct, update, and unfinished delivery paths, including
-  coalesced reservations, and can be decided again only after that receipt
-  completes.
-- A thrown decision error stops candidate publication, reaches an attached
-  direct caller without a duplicate notification, or reaches
-  `transactionStore(didFailWith:)` once for background-owned work.
-- Physical query completions reach the availability reducer once and in token
-  order before attached receipts complete. A coalesced completion uses the last
-  reservation token.
-- Startup-owned plain query failure is reported once.
-- Startup-owned catalog failure is reported once.
-- Background-owner/direct-observer and direct-owner/background-observer catalog
-  failures each complete state once, deliver the error to the attached direct
-  caller, and send no background diagnostic.
-- Background-owner/startup-observer and startup-owner/background-observer
-  failures each complete state and diagnostics once.
-- A physical failure is reported once if every direct caller abandons it.
-- The store retains its delegate until lifecycle completion, and `close()`
-  drains admitted decisions and notifications.
-- A delegate that implements only `transactionStore(didFailWith:)` inherits
-  `.automatic` and receives an unmanaged background transaction as an
-  `unhandledTransaction` failure.
-- Propagated callback context rejects direct and `Task {}` reentry into
-  admission-bearing store operations. A detached task does not inherit that
-  context; the contract test documents the detection boundary without claiming
-  that detached reentry throws.
-- The default no-op `transactionStore(didFailWith:)` does not block the runtime
-  or alter transaction policy.
-
-### Integration and distribution tests
-
-- App-hosted StoreKit tests cover monthly/yearly mapping, upgrades, a known-tier
-  to unknown-tier transition, restore, revocation, and recovery without fixed
-  sleeps.
-- The external consumer fixture builds the README story using only public API.
-- A second external fixture imports `StoreTransactionKitTesting`, starts from a
-  ready empty set, purchases a typed Product ID, and observes the ViewModel
-  change immediately after the command returns without a `.storekit` file.
-- A harness purchase uses the attached direct-operation path: a delegate,
-  automatic-handling, or catalog failure reaches the command caller and is not
-  duplicated in `reportedFailures`; `.completed` and `.keptUnfinished` return
-  only after MainActor publication.
-- A time-dependent consumer dependency reaches a registered Clock sleeper,
-  exposes its intermediate state, advances virtual time, and still waits for
-  the harness command's MainActor publication receipt. The test contains no
-  fixed sleeps or guessed `Task.yield()` counts.
-- `withTransactionStoreTestHarness` drains and closes after normal return,
-  operation failure, and cancellation; an operation failure is rethrown only
-  after cleanup.
-- Final scoped cleanup succeeds idempotently when the operation already called
-  `harness.store.close()`.
-- Cancellation before command admission creates no transaction; cancellation
-  after admission is still drained by scoped cleanup.
-- The testing product cannot be imported transitively by a consumer that
-  depends only on the production product.
-- Swift 6 strict-concurrency builds prove the primary-associated-type and
-  `Clock` existential, class and actor delegate conformances, and `Sendable`
-  surfaces.
-- DocC builds without warnings after symbol documentation is added.
+- The external production fixture builds the released README against public API.
+- A testing fixture starts ready-empty, purchases a typed Product ID, and reads
+  its ViewModel change immediately after the command returns without `.storekit`.
+- Wrong group ID, substituted group declaration, and undeclared Product ID
+  commands throw their testing errors before admission and leave state and
+  delegate calls unchanged.
+- A second purchase in the same group replaces the active synthetic product and
+  publishes the newly mapped entitlement without retaining a synthetic upgraded
+  snapshot.
+- Harness validation and decision errors reach the command caller directly;
+  failures after acknowledgement use the production completed-action wrapper.
+- A synthetic store refreshes its synthetic set and closes normally; process,
+  history, and restore throw `operationUnavailable` before live StoreKit work.
+- Passing a real purchase result to a synthetic store cannot call live
+  `Transaction.finish()` or bypass the process-wide live lease.
+- Scoped cleanup drains after success, failure, and cancellation and remains
+  idempotent if the operation called `store.close()`.
+- A timed app dependency reaches a registered sleeper, exposes intermediate
+  state, advances virtual time, and still awaits the purchase publication
+  receipt without fixed sleeps.
+- The test clock releases only due sleepers, removes cancelled sleepers, and
+  resumes a cancelled sleep with `CancellationError`.
+- The sleep-registration barrier handles multiple waiters and cancellation
+  without polling; invalid negative advances or counts fail in subprocess
+  precondition tests.
+- App-hosted StoreKit tests cover monthly/yearly products, real upgrade and
+  downgrade behavior, restore, renewal, expiration, revocation, and recovery.
+- The testing product is not imported transitively by production consumers.
+- Swift 6 strict-concurrency builds cover primary-associated-type, Clock
+  existential, actor/class delegate, and Sendable surfaces.
+- Symbol DocC and the consumer article build without warnings.
 
 ## Implementation transaction
 
-This public redesign is complete only when one change updates all of the
-following:
+The redesign is complete only when one change updates all of the following:
 
 - Public source and symbol documentation.
 - Unit and app-hosted StoreKit tests.
-- The `StoreTransactionKitTesting` product, its one-way target dependency, and
-  package-scoped production seams used by its synthetic source.
+- The `StoreTransactionKitTesting` product and its one-way target dependency.
+- Package-scoped production seams used by the synthetic source.
 - Production and testing external consumer fixtures.
-- README and DocC examples.
-- Any dependent app and its resolved package revision.
+- The released README and hosted DocC examples.
+- Every dependent app and its resolved package revision.
 
-No compatibility alias or deprecated initializer is planned while the package
-is beta.
+Until that transaction lands, the README must show only the released API. Once
+the contract is implemented and moved into symbol DocC and a consumer article,
+this proposal is deleted. No compatibility alias or deprecated initializer is
+planned while the package is beta.
 
 ## References
 
@@ -1220,10 +1174,8 @@ is beta.
 - [`Transaction.isUpgraded`](https://developer.apple.com/documentation/storekit/transaction/isupgraded)
 - [`Transaction.currentEntitlements`](https://developer.apple.com/documentation/storekit/transaction/currententitlements)
 - [`WKNavigationDelegate`](https://developer.apple.com/documentation/webkit/wknavigationdelegate)
-- [`WKNavigationResponsePolicy`](https://developer.apple.com/documentation/webkit/wknavigationresponsepolicy)
 - [`TaskLocal`](https://developer.apple.com/documentation/swift/tasklocal)
 - [`Task.detached(priority:operation:)`](https://developer.apple.com/documentation/swift/task/detached(priority:operation:))
-- [`SendableMetatype`](https://developer.apple.com/documentation/swift/sendablemetatype)
 - [`Clock`](https://developer.apple.com/documentation/swift/clock)
 - [SE-0329: Clock, Instant, and Duration](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0329-clock-instant-duration.md)
 - [Using Continuations and Clock for deterministic Swift concurrency tests](https://zenn.dev/kntk/articles/2e8d1925b0bb6b)
