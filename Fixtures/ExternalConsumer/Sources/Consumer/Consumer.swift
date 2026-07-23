@@ -60,10 +60,8 @@ public actor AppTransactionDelegate: TransactionStoreDelegate {
 }
 
 public actor AppUnrecognizedSubscriptionDelegate:
-    UnrecognizedSubscriptionDelegate
+    UnrecognizedSubscriptionDelegate<SubscriptionEntitlement>
 {
-    public typealias Entitlement = SubscriptionEntitlement
-
     public init() {}
 
     public func decidePolicy(
