@@ -65,10 +65,10 @@ SubscriptionStoreView(
 ```
 
 This keeps the paywall aligned with the catalog in this binary. A valid
-same-group product can still arrive from another device or purchase path. An
-unrecognized product remains in the raw projection, grants no typed access by
-default, and doesn't by itself make entitlement readiness fail. See
-<doc:UnderstandingTransactionHandling> to choose another policy with
+same-group product can still arrive from another device or purchase path. A
+non-upgraded unrecognized product remains in the raw projection, grants no
+typed access by default, and doesn't by itself make entitlement readiness fail.
+See <doc:UnderstandingTransactionHandling> to choose another policy with
 ``UnrecognizedSubscriptionDelegate``.
 
 ## Read access without blocking the UI

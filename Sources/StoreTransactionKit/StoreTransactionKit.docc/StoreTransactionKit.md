@@ -23,14 +23,15 @@ override.
 
 The optional ``TransactionStoreDelegate`` owns only app-specific durable
 effects and background-failure reactions. Without a delegate, the default
-policy finishes catalog-declared auto-renewable subscriptions. StoreTransactionKit
-still verifies deliveries, reconciles unfinished work, validates catalog
-metadata, orders history, restores purchases, reports background failures, and
-drains admitted work during explicit shutdown.
+policy finishes catalog-declared and upgraded same-group auto-renewable
+subscriptions. StoreTransactionKit still verifies deliveries, reconciles
+unfinished work, validates catalog metadata, orders history, restores
+purchases, reports background failures, and drains admitted work during
+explicit shutdown.
 
-Products in the managed group that this binary doesn't recognize remain in the
-raw projection and don't invalidate entitlement readiness. The optional
-``UnrecognizedSubscriptionDelegate`` can leave an unfinished delivery
+A non-upgraded product in the managed group that this binary doesn't recognize
+remains in the raw projection and doesn't invalidate entitlement readiness. The
+optional ``UnrecognizedSubscriptionDelegate`` can leave an unfinished delivery
 unfinished, finish it without a typed grant, or map its exact revision to a
 known app entitlement.
 

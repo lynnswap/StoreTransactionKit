@@ -171,10 +171,10 @@ let store = TransactionStore(
 
 ## Unrecognized subscriptions
 
-A product added to the same subscription group after this binary ships can
-still arrive through another device or purchase path. By default, the store
-keeps the verified raw transaction, grants no typed entitlement, and leaves an
-unfinished delivery unfinished.
+A non-upgraded product added to the same subscription group after this binary
+ships can still arrive through another device or purchase path. By default, the
+store keeps the verified raw transaction, grants no typed entitlement, and
+leaves an unfinished delivery unfinished.
 
 Supply a separate delegate only when the app knows how to handle that product:
 
@@ -213,9 +213,10 @@ for the complete policy contract.
 
 `TransactionStoreDelegate` is separate from
 `UnrecognizedSubscriptionDelegate`. Supply it only when the app owns an
-additional durable effect for a declared or out-of-group transaction, or needs
-background-failure notifications. Without it, automatic handling finishes
-catalog-declared auto-renewable subscriptions.
+additional durable effect for a declared transaction, an upgraded same-group
+transaction, or an out-of-group transaction, or needs background-failure
+notifications. Without it, automatic handling finishes catalog-declared and
+upgraded auto-renewable subscriptions.
 
 Return `.finish` only after applying an app-owned effect durably. Throwing leaves
 the transaction unfinished so a later StoreKit delivery can retry it.

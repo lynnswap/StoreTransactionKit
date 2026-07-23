@@ -1,5 +1,5 @@
-/// The action StoreTransactionKit takes for a valid, undeclared subscription
-/// in the catalog's subscription group.
+/// The action StoreTransactionKit takes for a valid, non-upgraded undeclared
+/// subscription in the catalog's subscription group.
 public enum UnrecognizedSubscriptionPolicy<Entitlement>: Sendable, Hashable
 where Entitlement: Hashable & Sendable {
     /// Grants no typed entitlement and leaves an unfinished delivery unfinished.

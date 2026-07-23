@@ -32,6 +32,9 @@ its policy owner:
   managed by ``TransactionStoreDelegate``.
   ``StoreTransactionHandlingPolicy/automatic`` and
   ``StoreTransactionHandlingPolicy/finish`` both allow finishing it.
+- An undeclared same-group subscription that StoreKit marks as upgraded grants
+  no typed access and is also managed by ``TransactionStoreDelegate``.
+  `.automatic` and `.finish` both allow finishing it.
 - A product outside the catalog's group is unmanaged. `.automatic` throws
   ``StoreTransactionError/unhandledTransaction(productID:productType:)``;
   `.finish` allows finishing only after the app has durably handled it.
@@ -97,8 +100,8 @@ refresh publishes a new ready snapshot.
 The catalog maps declared Product IDs to app entitlement values. It does not
 copy StoreKit group levels or subscription periods into the entitlement type,
 and multiple Product IDs may map to the same value. A transaction that StoreKit
-marks as upgraded grants no typed access. A valid unrecognized same-group
-product remains in the raw projection without making readiness fail.
+marks as upgraded grants no typed access. A valid non-upgraded unrecognized
+same-group product remains in the raw projection without making readiness fail.
 `.leaveUnfinished` and `.finish` grant no typed access;
 `.treatAs(entitlement)` adds the selected value. A thrown unrecognized decision
 is a transient failure, not a catalog contradiction. The raw projection
