@@ -59,7 +59,8 @@ where Entitlement: Hashable & Sendable {
     /// The latest complete raw StoreKit entitlement projection.
     ///
     /// This value is non-`nil` only in ``EntitlementStatus/ready``. Override
-    /// mode has no synthetic raw StoreKit projection.
+    /// mode has no synthetic raw StoreKit projection. A ready projection can
+    /// include a valid same-group product that this binary doesn't declare.
     public var entitlements: StoreEntitlements? {
         guard case .ready(let entitlements, _) = availability else {
             return nil
@@ -69,9 +70,11 @@ where Entitlement: Hashable & Sendable {
 
     /// The app-defined entitlements granted by the current catalog projection.
     ///
-    /// A non-`nil` empty set authoritatively means that no declared entitlement
-    /// is active. The value is `nil` while loading or when no usable projection
-    /// is available after failure.
+    /// A non-`nil` empty set authoritatively means that no app entitlement is
+    /// active. Declared products use the catalog mapping; an unrecognized
+    /// subscription contributes only when its delegate policy uses
+    /// ``UnrecognizedSubscriptionPolicy/treatAs(_:)``. The value is `nil` while
+    /// loading or when no usable projection is available after failure.
     public var activeEntitlements: Set<Entitlement>? {
         switch availability {
         case .ready(_, let activeEntitlements),
@@ -89,12 +92,17 @@ where Entitlement: Hashable & Sendable {
     /// Creates the process's live StoreKit store for an auto-renewable subscription catalog.
     ///
     /// Initialization starts transaction monitoring and the first entitlement
-    /// reconciliation. The store strongly retains `delegate` until terminal
+    /// reconciliation. The store strongly retains both delegates until terminal
     /// shutdown. Creating a second live store in the same process before the
-    /// first store finishes ``close()`` is a programmer error.
+    /// first store finishes ``close()`` is a programmer error. Without
+    /// `unrecognizedSubscriptionDelegate`, valid non-upgraded undeclared
+    /// same-group subscriptions use
+    /// ``UnrecognizedSubscriptionPolicy/leaveUnfinished``.
     public convenience init(
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
-        delegate: (any TransactionStoreDelegate)? = nil
+        delegate: (any TransactionStoreDelegate)? = nil,
+        unrecognizedSubscriptionDelegate:
+            (any UnrecognizedSubscriptionDelegate<Entitlement>)? = nil
     ) {
         let liveLease = LiveTransactionStoreLease.acquire()
         let lifecycle = TransactionStoreLifecycle(liveLease: liveLease)
@@ -103,7 +111,9 @@ where Entitlement: Hashable & Sendable {
             lifecycle: lifecycle,
             backendKind: .live,
             subscriptionCatalog: subscriptionCatalog,
-            delegate: delegate
+            delegate: delegate,
+            unrecognizedSubscriptionDelegate:
+                unrecognizedSubscriptionDelegate
         )
     }
 
@@ -129,13 +139,17 @@ where Entitlement: Hashable & Sendable {
     convenience init(
         source: StoreTransactionSource,
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
-        delegate: (any TransactionStoreDelegate)? = nil
+        delegate: (any TransactionStoreDelegate)? = nil,
+        unrecognizedSubscriptionDelegate:
+            (any UnrecognizedSubscriptionDelegate<Entitlement>)? = nil
     ) {
         self.init(
             source: source,
             lifecycle: TransactionStoreLifecycle(),
             subscriptionCatalog: subscriptionCatalog,
-            delegate: delegate
+            delegate: delegate,
+            unrecognizedSubscriptionDelegate:
+                unrecognizedSubscriptionDelegate
         )
     }
 
@@ -143,14 +157,18 @@ where Entitlement: Hashable & Sendable {
         source: StoreTransactionSource,
         lifecycle: TransactionStoreLifecycle,
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
-        delegate: (any TransactionStoreDelegate)? = nil
+        delegate: (any TransactionStoreDelegate)? = nil,
+        unrecognizedSubscriptionDelegate:
+            (any UnrecognizedSubscriptionDelegate<Entitlement>)? = nil
     ) {
         self.init(
             source: source,
             lifecycle: lifecycle,
             backendKind: .live,
             subscriptionCatalog: subscriptionCatalog,
-            delegate: delegate
+            delegate: delegate,
+            unrecognizedSubscriptionDelegate:
+                unrecognizedSubscriptionDelegate
         )
     }
 
@@ -158,6 +176,8 @@ where Entitlement: Hashable & Sendable {
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
         syntheticSource: SyntheticStoreTransactionSource,
         delegate: (any TransactionStoreDelegate)? = nil,
+        unrecognizedSubscriptionDelegate:
+            (any UnrecognizedSubscriptionDelegate<Entitlement>)? = nil,
         unavailableOperationError:
             @escaping @Sendable (StoreTransactionOperation) -> any Error
     ) {
@@ -166,7 +186,9 @@ where Entitlement: Hashable & Sendable {
             lifecycle: TransactionStoreLifecycle(),
             backendKind: .synthetic(unavailableOperationError),
             subscriptionCatalog: subscriptionCatalog,
-            delegate: delegate
+            delegate: delegate,
+            unrecognizedSubscriptionDelegate:
+                unrecognizedSubscriptionDelegate
         )
     }
 
@@ -180,7 +202,9 @@ where Entitlement: Hashable & Sendable {
         lifecycle: TransactionStoreLifecycle,
         backendKind: BackendKind,
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
-        delegate: (any TransactionStoreDelegate)?
+        delegate: (any TransactionStoreDelegate)?,
+        unrecognizedSubscriptionDelegate:
+            (any UnrecognizedSubscriptionDelegate<Entitlement>)?
     ) {
         let sessionID = UUID()
         let owner = TransactionStoreAvailabilityOwner<Entitlement>()
@@ -190,6 +214,8 @@ where Entitlement: Hashable & Sendable {
             lifecycle: lifecycle,
             subscriptionCatalog: subscriptionCatalog,
             delegate: delegate,
+            unrecognizedSubscriptionDelegate:
+                unrecognizedSubscriptionDelegate,
             entitlementOutcome: { outcome in
                 await owner.apply(outcome)
             }
@@ -233,10 +259,10 @@ where Entitlement: Hashable & Sendable {
 
     /// Processes a direct result from custom purchase UI.
     ///
-    /// A successful verified purchase completes only after policy selection,
-    /// finishing, causal entitlement reconciliation, and main-actor publication.
-    /// Pending and user-cancelled results return their corresponding semantic
-    /// outcome without transaction processing.
+    /// A verified purchase returns only after policy selection, the selected
+    /// finish or leave action, causal entitlement reconciliation, and main-actor
+    /// publication. Pending and user-cancelled results return their corresponding
+    /// semantic outcome without transaction processing.
     public func process(
         _ result: Product.PurchaseResult
     ) async throws -> StorePurchaseOutcome {
@@ -259,10 +285,10 @@ where Entitlement: Hashable & Sendable {
         )
     }
 
-    @discardableResult
     package func processSyntheticDelivery(
-        _ delivery: StoreTransactionDelivery
-    ) async throws -> StoreTransactionSnapshot {
+        _ delivery: StoreTransactionDelivery,
+        didAdmit: @escaping @Sendable () async -> Void = {}
+    ) async throws -> StorePurchaseOutcome {
         try rejectReentrancy(operation: .processPurchase)
         guard case .syntheticRuntime(let runtime, let lifecycle, _) = backend else {
             preconditionFailure(
@@ -270,11 +296,11 @@ where Entitlement: Hashable & Sendable {
             )
         }
         let leases = try lifecycle.beginOperation()
-        let outcome = try await runtime.process(delivery, leases: leases)
-        guard case .completed(let snapshot) = outcome else {
-            preconditionFailure("A synthetic delivery must complete a transaction.")
-        }
-        return snapshot
+        return try await runtime.process(
+            delivery,
+            leases: leases,
+            didAdmit: didAdmit
+        )
     }
 
     /// Reconciles unfinished transactions and publishes current entitlements.

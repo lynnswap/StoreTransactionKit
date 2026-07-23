@@ -3,8 +3,8 @@ import StoreKit
 /// A validated mapping from one auto-renewable subscription group to app entitlements.
 ///
 /// The catalog treats ``AutoRenewableSubscriptionGroup/subscriptions`` as the
-/// complete declaration of product identifiers that can grant typed access and
-/// validates StoreKit product type and group metadata before publication.
+/// product identifiers known to this binary and validates StoreKit product type
+/// and group metadata before publication.
 public struct AutoRenewableSubscriptionCatalog<Entitlement>: Sendable
 where Entitlement: Hashable & Sendable {
     package let subscriptionGroupID: SubscriptionGroupID
@@ -49,38 +49,12 @@ where Entitlement: Hashable & Sendable {
         self.entitlementsByProductID = entitlementsByProductID
     }
 
-    package func activeEntitlements(
-        in entitlements: StoreEntitlements
-    ) throws(AutoRenewableSubscriptionCatalogError) -> Set<Entitlement> {
-        var activeEntitlements: Set<Entitlement> = []
-
-        for transaction in entitlements.transactions {
-            switch try validatedTransaction(transaction) {
-            case let .declared(entitlement):
-                if !transaction.isUpgraded {
-                    activeEntitlements.insert(entitlement)
-                }
-
-            case .retiredUpgraded, .unmanaged:
-                continue
-            }
-        }
-
-        return activeEntitlements
-    }
-
     package func classification(
         of transaction: StoreTransactionSnapshot
     ) throws(AutoRenewableSubscriptionCatalogError)
-        -> AutoRenewableSubscriptionClassification
+        -> AutoRenewableSubscriptionClassification<Entitlement>
     {
-        switch try validatedTransaction(transaction) {
-        case .declared, .retiredUpgraded:
-            .managed
-
-        case .unmanaged:
-            .unmanaged
-        }
+        try validatedTransaction(transaction)
     }
 
     package func isDeclared(by groupType: Any.Type) -> Bool {
@@ -117,13 +91,6 @@ where Entitlement: Hashable & Sendable {
             return .unmanaged
         }
 
-        guard transaction.isUpgraded else {
-            throw AutoRenewableSubscriptionCatalogError.undeclaredProduct(
-                productID: transaction.productID,
-                subscriptionGroupID: subscriptionGroupID
-            )
-        }
-
         guard transaction.productType == .autoRenewable else {
             throw AutoRenewableSubscriptionCatalogError.productTypeMismatch(
                 productID: transaction.productID,
@@ -131,12 +98,9 @@ where Entitlement: Hashable & Sendable {
             )
         }
 
-        return .retiredUpgraded
+        return transaction.isUpgraded ? .retiredUpgraded : .unrecognized
     }
 
-    private enum ValidatedTransaction {
-        case declared(Entitlement)
-        case retiredUpgraded
-        case unmanaged
-    }
+    private typealias ValidatedTransaction =
+        AutoRenewableSubscriptionClassification<Entitlement>
 }

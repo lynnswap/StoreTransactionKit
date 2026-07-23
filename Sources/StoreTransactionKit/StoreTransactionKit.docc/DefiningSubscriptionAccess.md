@@ -42,14 +42,34 @@ let subscriptionCatalog = AutoRenewableSubscriptionCatalog(Plans.self)
 
 Use the group ID and Product ID raw values exactly as configured in App Store
 Connect. ``AutoRenewableSubscriptionGroup/subscriptions`` is the complete
-entitlement-granting declaration; a case that is present only in `ProductID`
-doesn't grant typed access. The catalog requires at least one product, nonempty
-raw identifiers, and no duplicate raw Product IDs. Several products may grant
-the same entitlement.
+entitlement mapping known to this binary; it isn't a promise that the live
+subscription group contains no other Product IDs. A case that is present only
+in `ProductID` doesn't grant typed access. The catalog requires at least one
+product, nonempty raw identifiers, and no duplicate raw Product IDs. Several
+products may grant the same entitlement.
 
 The compiler keeps group-specific Product IDs and app entitlements typed. At
 runtime, the catalog also validates each matching transaction's auto-renewable
 product type and subscription group before publishing access.
+
+## Merchandise declared products
+
+Pass the same declared Product IDs to StoreKit's subscription view:
+
+```swift
+import StoreKit
+
+SubscriptionStoreView(
+    productIDs: Plans.subscriptions.map(\.id.rawValue)
+)
+```
+
+This keeps the paywall aligned with the catalog in this binary. A valid
+same-group product can still arrive from another device or purchase path. A
+non-upgraded unrecognized product remains in the raw projection, grants no
+typed access by default, and doesn't by itself make entitlement readiness fail.
+See <doc:UnderstandingTransactionHandling> to choose another policy with
+``UnrecognizedSubscriptionDelegate``.
 
 ## Read access without blocking the UI
 

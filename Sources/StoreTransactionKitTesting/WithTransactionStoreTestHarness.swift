@@ -2,11 +2,16 @@ import StoreTransactionKit
 
 /// Runs a scoped test with a ready-empty synthetic transaction store.
 ///
+/// Supply the same transaction delegates as the app's live composition root to
+/// exercise their production policy paths without StoreKit.
+///
 /// The store is closed and drained before this function returns or throws.
 @MainActor
 public func withTransactionStoreTestHarness<Entitlement, Result>(
     subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
     delegate: (any TransactionStoreDelegate)? = nil,
+    unrecognizedSubscriptionDelegate:
+        (any UnrecognizedSubscriptionDelegate<Entitlement>)? = nil,
     _ operation:
         @MainActor (
             TransactionStoreTestHarness<Entitlement>
@@ -15,7 +20,9 @@ public func withTransactionStoreTestHarness<Entitlement, Result>(
 where Entitlement: Hashable & Sendable {
     let harness = try await TransactionStoreTestHarness.make(
         subscriptionCatalog: subscriptionCatalog,
-        delegate: delegate
+        delegate: delegate,
+        unrecognizedSubscriptionDelegate:
+            unrecognizedSubscriptionDelegate
     )
 
     let operationResult: Swift.Result<Result, any Error>

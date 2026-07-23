@@ -8,8 +8,8 @@ and observable subscription access in one process-owned store.
 StoreKit can deliver the same purchase through a direct
 `Product.PurchaseResult`, `Transaction.updates`, and unfinished-transaction
 reconciliation. ``TransactionStore`` joins those paths by exact transaction
-revision, applies one handling policy, and publishes raw and app-defined
-entitlement state together on the main actor.
+revision and publishes raw and app-defined entitlement state together on the
+main actor.
 
 Define one ``AutoRenewableSubscriptionCatalog`` from the Product IDs in an App
 Store Connect subscription group. Several products, such as monthly and yearly
@@ -23,10 +23,17 @@ override.
 
 The optional ``TransactionStoreDelegate`` owns only app-specific durable
 effects and background-failure reactions. Without a delegate, the default
-policy finishes catalog-managed auto-renewable subscriptions. StoreTransactionKit
-still verifies deliveries, reconciles unfinished work, validates catalog
-metadata, orders history, restores purchases, reports background failures, and
-drains admitted work during explicit shutdown.
+policy finishes catalog-declared and upgraded same-group auto-renewable
+subscriptions. StoreTransactionKit still verifies deliveries, reconciles
+unfinished work, validates catalog metadata, orders history, restores
+purchases, reports background failures, and drains admitted work during
+explicit shutdown.
+
+A non-upgraded product in the managed group that this binary doesn't recognize
+remains in the raw projection and doesn't invalidate entitlement readiness. The
+optional ``UnrecognizedSubscriptionDelegate`` can leave an unfinished delivery
+unfinished, finish it without a typed grant, or map its exact revision to a
+known app entitlement.
 
 Start with <doc:DefiningSubscriptionAccess>, then read
 <doc:UnderstandingTransactionHandling> before adding an app-owned transaction
@@ -59,6 +66,8 @@ that use the production store data flow.
 
 - ``TransactionStoreDelegate``
 - ``StoreTransactionHandlingPolicy``
+- ``UnrecognizedSubscriptionDelegate``
+- ``UnrecognizedSubscriptionPolicy``
 - ``StorePurchaseOutcome``
 - ``StoreTransactionSnapshot``
 

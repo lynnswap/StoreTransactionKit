@@ -22,3 +22,28 @@ func subscriptionUpdatesViewModel() async throws {
         #expect(viewModel.canExportPDF)
     }
 }
+
+@Test
+@MainActor
+func unrecognizedSubscriptionUpdatesViewModel() async throws {
+    let delegate = AppUnrecognizedSubscriptionDelegate()
+
+    try await withTransactionStoreTestHarness(
+        subscriptionCatalog: subscriptionCatalog,
+        unrecognizedSubscriptionDelegate: delegate
+    ) { harness in
+        let viewModel = NotesViewModel(store: harness.store)
+        let transaction = try harness.makeUnrecognizedSubscription(
+            productID: legacySubscriptionProductID,
+            in: Plans.self
+        )
+
+        #expect(!viewModel.canExportPDF)
+        #expect(
+            try await harness.deliver(transaction)
+                == .completed(transaction)
+        )
+        #expect(harness.store.entitlements?.transactions == [transaction])
+        #expect(viewModel.canExportPDF)
+    }
+}

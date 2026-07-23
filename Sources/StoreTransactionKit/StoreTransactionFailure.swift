@@ -115,7 +115,8 @@ public enum StoreTransactionError: Error, Sendable {
     /// StoreKit returned a purchase result unknown to this framework version.
     case unknownPurchaseResult
 
-    /// Automatic handling was requested for a product outside the managed catalog.
+    /// Automatic handling was requested for a product outside the catalog's
+    /// subscription group.
     case unhandledTransaction(
         productID: Product.ID,
         productType: Product.ProductType

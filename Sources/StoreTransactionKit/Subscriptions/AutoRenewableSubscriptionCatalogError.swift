@@ -3,13 +3,7 @@ import StoreKit
 
 /// An inconsistency between a transaction snapshot and a subscription catalog.
 public enum AutoRenewableSubscriptionCatalogError: LocalizedError, Sendable {
-    /// A current product in the managed group has no catalog declaration.
-    case undeclaredProduct(
-        productID: Product.ID,
-        subscriptionGroupID: SubscriptionGroupID
-    )
-
-    /// A catalog product isn't an auto-renewable subscription.
+    /// A declared or same-group product isn't an auto-renewable subscription.
     case productTypeMismatch(
         productID: Product.ID,
         actual: Product.ProductType
@@ -25,10 +19,6 @@ public enum AutoRenewableSubscriptionCatalogError: LocalizedError, Sendable {
     /// A localized description of the catalog inconsistency.
     public var errorDescription: String? {
         switch self {
-        case let .undeclaredProduct(productID, subscriptionGroupID):
-            "Product \(productID) is not declared in subscription group "
-                + "\(subscriptionGroupID.rawValue)."
-
         case let .productTypeMismatch(productID, actual):
             "Product \(productID) has type \(actual); expected an "
                 + "auto-renewable subscription."

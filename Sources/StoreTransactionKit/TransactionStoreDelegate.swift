@@ -1,9 +1,11 @@
 /// The action StoreTransactionKit takes after classifying a verified transaction.
 public enum StoreTransactionHandlingPolicy: Sendable, Hashable {
-    /// Finishes a catalog-managed transaction without an app-owned business effect.
+    /// Finishes a framework-managed transaction without an app-owned business
+    /// effect.
     ///
-    /// StoreTransactionKit rejects this policy for a transaction outside the
-    /// managed subscription catalog.
+    /// This applies to catalog-declared subscriptions and undeclared same-group
+    /// subscriptions that StoreKit marks as upgraded. StoreTransactionKit
+    /// rejects this policy for an out-of-group transaction.
     case automatic
 
     /// Finishes a transaction after the app has durably applied its business effect.
@@ -17,14 +19,18 @@ public enum StoreTransactionHandlingPolicy: Sendable, Hashable {
 ///
 /// The delegate is optional because both requirements have default
 /// implementations. Policy decisions and failure notifications are each
-/// serialized, but the two streams may overlap.
+/// serialized, but the two streams may overlap. Valid non-upgraded undeclared
+/// subscriptions in the catalog's group are resolved separately by
+/// ``UnrecognizedSubscriptionDelegate``.
 public protocol TransactionStoreDelegate: AnyObject, Sendable {
     /// Chooses how to handle a verified transaction.
     ///
     /// StoreTransactionKit invokes decisions serially after catalog
-    /// classification. Throwing prevents the transaction from being finished
-    /// and prevents its causal entitlement refresh. A later independent
-    /// StoreKit delivery may retry the exact revision.
+    /// classification for declared transactions, undeclared same-group
+    /// transactions that StoreKit marks as upgraded, and out-of-group
+    /// transactions. Throwing prevents the transaction from being finished and
+    /// prevents its causal entitlement refresh. A later independent StoreKit
+    /// delivery may retry the exact revision.
     func decidePolicy(
         for transaction: StoreTransactionSnapshot
     ) async throws -> StoreTransactionHandlingPolicy

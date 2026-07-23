@@ -3,8 +3,9 @@ import StoreKit
 import StoreTransactionKit
 
 @MainActor
-final class SyntheticCurrentEntitlements: Sendable {
+final class SyntheticTransactionLedger: Sendable {
     private var nextTransactionID: UInt64 = 1
+    private var registeredSnapshots: [UInt64: StoreTransactionSnapshot] = [:]
     private var activeSnapshot: StoreTransactionSnapshot?
 
     func snapshots() -> [StoreTransactionSnapshot] {
@@ -15,7 +16,7 @@ final class SyntheticCurrentEntitlements: Sendable {
         }
     }
 
-    func makeSnapshot(
+    func makeRegisteredSnapshot(
         productID: String,
         subscriptionGroupID: SubscriptionGroupID
     ) -> StoreTransactionSnapshot {
@@ -27,7 +28,7 @@ final class SyntheticCurrentEntitlements: Sendable {
         nextTransactionID += 1
 
         let date = Date(timeIntervalSince1970: TimeInterval(transactionID))
-        return StoreTransactionSnapshot(
+        let snapshot = StoreTransactionSnapshot(
             id: transactionID,
             originalID: transactionID,
             productID: productID,
@@ -53,9 +54,23 @@ final class SyntheticCurrentEntitlements: Sendable {
             jwsRepresentation:
                 "StoreTransactionKitTesting.synthetic.\(transactionID)"
         )
+        precondition(registeredSnapshots[transactionID] == nil)
+        registeredSnapshots[transactionID] = snapshot
+        return snapshot
     }
 
-    func replace(with snapshot: StoreTransactionSnapshot) {
+    func contains(_ snapshot: StoreTransactionSnapshot) -> Bool {
+        registeredSnapshots[snapshot.id] == snapshot
+    }
+
+    func activate(_ snapshot: StoreTransactionSnapshot) {
+        precondition(
+            contains(snapshot),
+            "Only a transaction registered by this test harness can become current."
+        )
+        guard activeSnapshot.map({ $0.id <= snapshot.id }) ?? true else {
+            return
+        }
         activeSnapshot = snapshot
     }
 }

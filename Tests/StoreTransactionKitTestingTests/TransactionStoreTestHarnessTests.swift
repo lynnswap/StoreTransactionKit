@@ -1,3 +1,4 @@
+import Foundation
 import StoreTransactionKit
 import StoreTransactionKitTesting
 import StoreKit
@@ -73,6 +74,314 @@ struct TransactionStoreTestHarnessTests {
 
             let refreshed = try await harness.store.refreshEntitlements()
             #expect(refreshed.transactions == [second])
+        }
+    }
+
+    @MainActor
+    @Test("default unrecognized policy publishes raw ready state without entitlement")
+    func defaultUnrecognizedPolicy() async throws {
+        let generalDelegate = ActorRecordingDelegate()
+
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog,
+            delegate: generalDelegate
+        ) { harness in
+            let transaction = try harness.makeUnrecognizedSubscription(
+                productID: "testing.subscription.legacy",
+                in: HarnessPlans.self
+            )
+
+            #expect(
+                try await harness.deliver(transaction)
+                    == .leftUnfinished(transaction)
+            )
+            #expect(harness.store.entitlements?.transactions == [transaction])
+            #expect(harness.store.activeEntitlements == [])
+            #expect(
+                await generalDelegate.snapshot()
+                    == .init(decisions: 0, failures: 0)
+            )
+        }
+    }
+
+    @MainActor
+    @Test("explicit leave policy is reused for an exact revision")
+    func explicitLeavePolicyReplay() async throws {
+        let delegate = HarnessUnrecognizedDelegate(policy: .leaveUnfinished)
+
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog,
+            unrecognizedSubscriptionDelegate: delegate
+        ) { harness in
+            let transaction = try harness.makeUnrecognizedSubscription(
+                productID: "testing.subscription.legacy",
+                in: HarnessPlans.self
+            )
+
+            #expect(
+                try await harness.deliver(transaction)
+                    == .leftUnfinished(transaction)
+            )
+            #expect(
+                try await harness.deliver(transaction)
+                    == .leftUnfinished(transaction)
+            )
+            #expect(await delegate.decisionCount() == 1)
+            #expect(harness.store.entitlements?.transactions == [transaction])
+            #expect(harness.store.activeEntitlements == [])
+        }
+    }
+
+    @MainActor
+    @Test("finish policy completes without a typed entitlement")
+    func unrecognizedFinishPolicy() async throws {
+        let delegate = HarnessUnrecognizedDelegate(policy: .finish)
+
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog,
+            unrecognizedSubscriptionDelegate: delegate
+        ) { harness in
+            let transaction = try harness.makeUnrecognizedSubscription(
+                productID: "testing.subscription.legacy",
+                in: HarnessPlans.self
+            )
+
+            #expect(
+                try await harness.deliver(transaction)
+                    == .completed(transaction)
+            )
+            #expect(await delegate.decisionCount() == 1)
+            #expect(harness.store.entitlements?.transactions == [transaction])
+            #expect(harness.store.activeEntitlements == [])
+        }
+    }
+
+    @MainActor
+    @Test("treat-as policy persists through explicit refresh")
+    func unrecognizedTreatAsPolicy() async throws {
+        let delegate = HarnessUnrecognizedDelegate(policy: .treatAs(.tier1))
+
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog,
+            unrecognizedSubscriptionDelegate: delegate
+        ) { harness in
+            let transaction = try harness.makeUnrecognizedSubscription(
+                productID: "testing.subscription.legacy",
+                in: HarnessPlans.self
+            )
+
+            #expect(
+                try await harness.deliver(transaction)
+                    == .completed(transaction)
+            )
+            #expect(harness.store.activeEntitlements == [.tier1])
+
+            let refreshed = try await harness.store.refreshEntitlements()
+
+            #expect(refreshed.transactions == [transaction])
+            #expect(harness.store.activeEntitlements == [.tier1])
+            #expect(await delegate.decisionCount() == 1)
+        }
+    }
+
+    @MainActor
+    @Test("replaying an older revision does not replace a later subscription")
+    func olderUnrecognizedReplayPreservesCurrentSubscription() async throws {
+        let delegate = HarnessUnrecognizedDelegate(policy: .treatAs(.tier1))
+
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog,
+            unrecognizedSubscriptionDelegate: delegate
+        ) { harness in
+            let older = try harness.makeUnrecognizedSubscription(
+                productID: "testing.subscription.legacy",
+                in: HarnessPlans.self
+            )
+            #expect(
+                try await harness.deliver(older)
+                    == .completed(older)
+            )
+
+            let current = try await harness.purchase(
+                .tier2_Monthly,
+                in: HarnessPlans.self
+            )
+            #expect(harness.store.entitlements?.transactions == [current])
+            #expect(harness.store.activeEntitlements == [.tier2])
+
+            #expect(
+                try await harness.deliver(older)
+                    == .completed(older)
+            )
+            #expect(harness.store.entitlements?.transactions == [current])
+            #expect(harness.store.activeEntitlements == [.tier2])
+
+            let refreshed = try await harness.store.refreshEntitlements()
+            #expect(refreshed.transactions == [current])
+            #expect(harness.store.activeEntitlements == [.tier2])
+            #expect(await delegate.decisionCount() == 1)
+        }
+    }
+
+    @MainActor
+    @Test("a thrown decision can retry the same registered revision")
+    func unrecognizedDecisionRetry() async throws {
+        let delegate = HarnessUnrecognizedDelegate { _, attempt in
+            if attempt == 1 {
+                throw HarnessTestError.decision
+            }
+            return .treatAs(.tier1)
+        }
+
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog,
+            unrecognizedSubscriptionDelegate: delegate
+        ) { harness in
+            let transaction = try harness.makeUnrecognizedSubscription(
+                productID: "testing.subscription.legacy",
+                in: HarnessPlans.self
+            )
+
+            await #expect(throws: HarnessTestError.decision) {
+                _ = try await harness.deliver(transaction)
+            }
+            #expect(harness.store.entitlements?.transactions.isEmpty == true)
+            #expect(harness.store.activeEntitlements == [])
+            #expect(await delegate.decisionCount() == 1)
+
+            #expect(
+                try await harness.deliver(transaction)
+                    == .completed(transaction)
+            )
+            #expect(harness.store.entitlements?.transactions == [transaction])
+            #expect(harness.store.activeEntitlements == [.tier1])
+            #expect(await delegate.decisionCount() == 2)
+        }
+    }
+
+    @MainActor
+    @Test("concurrent delivery of one revision joins one policy decision")
+    func concurrentUnrecognizedDelivery() async throws {
+        let decisionStarted = HarnessTestSignal()
+        let decisionGate = HarnessTestGate()
+        let secondStarted = HarnessTestSignal()
+        let delegate = HarnessUnrecognizedDelegate { _, _ in
+            decisionStarted.send()
+            try await decisionGate.wait()
+            return .treatAs(.tier1)
+        }
+
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog,
+            unrecognizedSubscriptionDelegate: delegate
+        ) { harness in
+            let transaction = try harness.makeUnrecognizedSubscription(
+                productID: "testing.subscription.legacy",
+                in: HarnessPlans.self
+            )
+            let first = Task { @MainActor in
+                try await harness.deliver(transaction)
+            }
+            await decisionStarted.wait()
+
+            let second = Task { @MainActor in
+                secondStarted.send()
+                return try await harness.deliver(transaction)
+            }
+            await secondStarted.wait()
+            #expect(await delegate.decisionCount() == 1)
+
+            await decisionGate.open()
+            #expect(try await first.value == .completed(transaction))
+            #expect(try await second.value == .completed(transaction))
+            #expect(await delegate.decisionCount() == 1)
+            #expect(harness.store.activeEntitlements == [.tier1])
+        }
+    }
+
+    @MainActor
+    @Test("unrecognized validation completes before production admission")
+    func unrecognizedValidationPrecedesAdmission() async throws {
+        let generalDelegate = ActorRecordingDelegate()
+        let unrecognizedDelegate = HarnessUnrecognizedDelegate(policy: .finish)
+        var foreignTransaction: StoreTransactionSnapshot?
+
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog,
+            delegate: generalDelegate,
+            unrecognizedSubscriptionDelegate: unrecognizedDelegate
+        ) { harness in
+            await expectHarnessError(
+                .subscriptionGroupMismatch(
+                    expected: HarnessPlans.id,
+                    actual: DifferentIDPlans.id
+                )
+            ) {
+                _ = try harness.makeUnrecognizedSubscription(
+                    productID: "testing.subscription.legacy",
+                    in: DifferentIDPlans.self
+                )
+            }
+            await expectHarnessError(
+                .subscriptionGroupTypeMismatch(
+                    subscriptionGroupID: HarnessPlans.id
+                )
+            ) {
+                _ = try harness.makeUnrecognizedSubscription(
+                    productID: "testing.subscription.legacy",
+                    in: SubstitutedPlans.self
+                )
+            }
+            await expectHarnessError(
+                .declaredProduct(
+                    productID:
+                        HarnessPlans.ProductID.tier1_Monthly.rawValue,
+                    subscriptionGroupID: HarnessPlans.id
+                )
+            ) {
+                _ = try harness.makeUnrecognizedSubscription(
+                    productID:
+                        HarnessPlans.ProductID.tier1_Monthly.rawValue,
+                    in: HarnessPlans.self
+                )
+            }
+
+            try await withTransactionStoreTestHarness(
+                subscriptionCatalog: harnessSubscriptionCatalog
+            ) { foreignHarness in
+                foreignTransaction =
+                    try foreignHarness.makeUnrecognizedSubscription(
+                        productID: "testing.subscription.foreign",
+                        in: HarnessPlans.self
+                    )
+            }
+            let foreignTransaction = try #require(foreignTransaction)
+            await expectHarnessError(
+                .unregisteredTransaction(
+                    transactionID: foreignTransaction.id
+                )
+            ) {
+                _ = try await harness.deliver(foreignTransaction)
+            }
+
+            #expect(
+                await generalDelegate.snapshot()
+                    == .init(decisions: 0, failures: 0)
+            )
+            #expect(await unrecognizedDelegate.decisionCount() == 0)
+            #expect(harness.store.entitlements?.transactions.isEmpty == true)
+            #expect(harness.store.activeEntitlements == [])
+
+            let firstRegistered =
+                try harness.makeUnrecognizedSubscription(
+                    productID: "testing.subscription.legacy",
+                    in: HarnessPlans.self
+                )
+            #expect(firstRegistered.id == 1)
+            #expect(
+                try await harness.deliver(firstRegistered)
+                    == .completed(firstRegistered)
+            )
         }
     }
 
@@ -289,6 +598,28 @@ struct TransactionStoreTestHarnessTests {
     }
 
     @MainActor
+    @Test("scoped cleanup closes a store with a left-unfinished revision")
+    func scopedUnfinishedCleanup() async throws {
+        var retained: TransactionStoreTestHarness<HarnessEntitlement>?
+
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog
+        ) { harness in
+            retained = harness
+            let transaction = try harness.makeUnrecognizedSubscription(
+                productID: "testing.subscription.legacy",
+                in: HarnessPlans.self
+            )
+            #expect(
+                try await harness.deliver(transaction)
+                    == .leftUnfinished(transaction)
+            )
+        }
+
+        try await expectClosed(try #require(retained))
+    }
+
+    @MainActor
     @Test("scoped cleanup closes a retained harness after operation failure")
     func scopedFailureCleanup() async throws {
         var retained: TransactionStoreTestHarness<HarnessEntitlement>?
@@ -448,6 +779,116 @@ private actor ThrowingDelegate: TransactionStoreDelegate {
 
     func snapshot() -> DelegateSnapshot {
         DelegateSnapshot(decisions: decisions, failures: failures)
+    }
+}
+
+private typealias HarnessUnrecognizedPolicy =
+    UnrecognizedSubscriptionPolicy<HarnessEntitlement>
+
+private actor HarnessUnrecognizedDelegate:
+    UnrecognizedSubscriptionDelegate
+{
+    typealias Entitlement = HarnessEntitlement
+
+    private let decide:
+        @Sendable (StoreTransactionSnapshot, Int) async throws
+            -> HarnessUnrecognizedPolicy
+    private var transactions: [StoreTransactionSnapshot] = []
+
+    init(policy: HarnessUnrecognizedPolicy) {
+        decide = { _, _ in policy }
+    }
+
+    init(
+        decide:
+            @escaping @Sendable (StoreTransactionSnapshot, Int) async throws
+            -> HarnessUnrecognizedPolicy
+    ) {
+        self.decide = decide
+    }
+
+    func decidePolicy(
+        forUnrecognizedSubscription transaction: StoreTransactionSnapshot
+    ) async throws -> HarnessUnrecognizedPolicy {
+        transactions.append(transaction)
+        return try await decide(transaction, transactions.count)
+    }
+
+    func decisionCount() -> Int {
+        transactions.count
+    }
+}
+
+private final class HarnessTestSignal: Sendable {
+    private struct State {
+        var isSignaled = false
+        var waiter: CheckedContinuation<Void, Never>?
+    }
+
+    private let state = Mutex(State())
+
+    func send() {
+        let waiter: CheckedContinuation<Void, Never>? = state.withLock { state in
+            guard !state.isSignaled else { return nil }
+            state.isSignaled = true
+            defer { state.waiter = nil }
+            return state.waiter
+        }
+        waiter?.resume()
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let shouldResume = state.withLock { state in
+                if state.isSignaled {
+                    return true
+                } else {
+                    precondition(state.waiter == nil)
+                    state.waiter = continuation
+                    return false
+                }
+            }
+            if shouldResume {
+                continuation.resume()
+            }
+        }
+    }
+}
+
+private actor HarnessTestGate {
+    private var isOpen = false
+    private var waiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
+
+    func wait() async throws {
+        guard !isOpen else { return }
+        try Task.checkCancellation()
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if isOpen {
+                    continuation.resume()
+                } else {
+                    waiters[id] = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
+        }
+    }
+
+    func open() {
+        isOpen = true
+        let pending = Array(waiters.values)
+        waiters.removeAll(keepingCapacity: false)
+        for waiter in pending {
+            waiter.resume()
+        }
+    }
+
+    private func cancelWaiter(_ id: UUID) {
+        waiters.removeValue(forKey: id)?.resume(
+            throwing: CancellationError()
+        )
     }
 }
 

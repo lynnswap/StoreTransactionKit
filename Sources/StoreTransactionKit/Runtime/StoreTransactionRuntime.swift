@@ -16,6 +16,7 @@ where Entitlement: Hashable & Sendable {
     private let source: StoreTransactionSource
     private let lifecycle: TransactionStoreLifecycle
     private let delegate: TransactionStoreDelegateReference
+    private let unrecognizedSubscriptions: UnrecognizedSubscriptionPolicyResolver<Entitlement>
     private let core: TransactionProcessingCore<StoreTransactionSnapshot>
     private let entitlements: EntitlementRefreshCoordinator<Entitlement>
     private let failures: FailureReporterDispatcher
@@ -33,6 +34,8 @@ where Entitlement: Hashable & Sendable {
         lifecycle: TransactionStoreLifecycle,
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
         delegate: (any TransactionStoreDelegate)?,
+        unrecognizedSubscriptionDelegate:
+            (any UnrecognizedSubscriptionDelegate<Entitlement>)? = nil,
         entitlementOutcome:
             @escaping @Sendable (EntitlementRefreshOutcome<Entitlement>) async
             -> Void,
@@ -45,6 +48,12 @@ where Entitlement: Hashable & Sendable {
 
         let delegateReference = TransactionStoreDelegateReference(delegate)
         self.delegate = delegateReference
+        let unrecognizedSubscriptions =
+            UnrecognizedSubscriptionPolicyResolver(
+                sessionID: sessionID,
+                delegate: unrecognizedSubscriptionDelegate
+            )
+        self.unrecognizedSubscriptions = unrecognizedSubscriptions
         let failures = FailureReporterDispatcher(
             sessionID: sessionID,
             lifetime: lifecycle,
@@ -58,7 +67,7 @@ where Entitlement: Hashable & Sendable {
             sessionID: sessionID,
             lifetime: lifecycle,
             handle: { transaction in
-                let classification: AutoRenewableSubscriptionClassification
+                let classification: AutoRenewableSubscriptionClassification<Entitlement>
                 do {
                     classification = try subscriptionCatalog.classification(
                         of: transaction
@@ -67,19 +76,34 @@ where Entitlement: Hashable & Sendable {
                     throw StoreTransactionCatalogFailure(error: error)
                 }
 
-                let policy = try await delegateReference.decidePolicy(
-                    for: transaction
-                )
-                switch (classification, policy) {
-                case (.managed, .automatic),
-                    (.managed, .finish),
-                    (.unmanaged, .finish):
-                    return
-                case (.unmanaged, .automatic):
-                    throw StoreTransactionError.unhandledTransaction(
-                        productID: transaction.productID,
-                        productType: transaction.productType
+                switch classification {
+                case .unrecognized:
+                    switch try await unrecognizedSubscriptions.policy(
+                        for: transaction
+                    ) {
+                    case .leaveUnfinished:
+                        return .leaveUnfinished
+                    case .finish, .treatAs:
+                        return .finish
+                    }
+
+                case .declared, .retiredUpgraded:
+                    _ = try await delegateReference.decidePolicy(
+                        for: transaction
                     )
+                    return .finish
+
+                case .unmanaged:
+                    let policy = try await delegateReference.decidePolicy(
+                        for: transaction
+                    )
+                    guard policy == .finish else {
+                        throw StoreTransactionError.unhandledTransaction(
+                            productID: transaction.productID,
+                            productType: transaction.productType
+                        )
+                    }
+                    return .finish
                 }
             }
         )
@@ -96,10 +120,38 @@ where Entitlement: Hashable & Sendable {
                     retryFailedTransactions: retryFailedTransactions
                 )
             },
-            project: {
-                (entitlements: StoreEntitlements) throws(AutoRenewableSubscriptionCatalogError)
-                    -> Set<Entitlement> in
-                try subscriptionCatalog.activeEntitlements(in: entitlements)
+            project: { entitlements in
+                var activeEntitlements: Set<Entitlement> = []
+                for transaction in entitlements.transactions {
+                    let classification: AutoRenewableSubscriptionClassification<Entitlement>
+                    do {
+                        classification = try subscriptionCatalog.classification(
+                            of: transaction
+                        )
+                    } catch let error
+                        as AutoRenewableSubscriptionCatalogError
+                    {
+                        throw StoreTransactionCatalogFailure(error: error)
+                    }
+
+                    switch classification {
+                    case .declared(let entitlement):
+                        if !transaction.isUpgraded {
+                            activeEntitlements.insert(entitlement)
+                        }
+                    case .retiredUpgraded, .unmanaged:
+                        continue
+                    case .unrecognized:
+                        if case .treatAs(let entitlement) =
+                            try await unrecognizedSubscriptions.policy(
+                                for: transaction
+                            )
+                        {
+                            activeEntitlements.insert(entitlement)
+                        }
+                    }
+                }
+                return activeEntitlements
             },
             didComplete: entitlementOutcome,
             failures: failures,
@@ -288,15 +340,17 @@ where Entitlement: Hashable & Sendable {
         }
         let claim = await accepted.acceptance.claimCausalResolutionIfOwner()
         await didAdmit()
-        let operationReceipt = ProcessingReceipt<StoreTransactionSnapshot>()
+        let operationReceipt = ProcessingReceipt<StorePurchaseOutcome>()
         let registration = finiteTasks.reserve()
         let task = Task {
             defer {
                 leases.work.end()
                 registration.complete()
             }
+            let disposition: TransactionProcessingDisposition
             do {
-                _ = try await accepted.acceptance.receipt.terminalValue()
+                disposition =
+                    try await accepted.acceptance.receipt.terminalValue()
             } catch {
                 if let claim {
                     await entitlements.resolve(claim, failure: error)
@@ -330,16 +384,26 @@ where Entitlement: Hashable & Sendable {
             }
 
             do {
-                _ = try await accepted.acceptance.causalReceipt.terminalValue()
+                let causalDisposition =
+                    try await accepted.acceptance.causalReceipt.terminalValue()
+                precondition(causalDisposition == disposition)
                 observation.succeed(binding)
-                operationReceipt.succeed(accepted.snapshot)
+                switch disposition {
+                case .finish:
+                    operationReceipt.succeed(.completed(accepted.snapshot))
+                case .leaveUnfinished:
+                    operationReceipt.succeed(
+                        .leftUnfinished(accepted.snapshot)
+                    )
+                }
             } catch {
                 operationReceipt.fail(
                     await directFailure(
                         observation: observation,
                         binding: binding,
-                        propagating: completedTransactionFailure(
+                        propagating: causalTransactionFailure(
                             snapshot: accepted.snapshot,
+                            disposition: disposition,
                             error: error
                         ),
                         reportsWhenAbandoned: true,
@@ -355,7 +419,7 @@ where Entitlement: Hashable & Sendable {
             receipt: operationReceipt,
             observation: observation,
             observerLease: leases.observer
-        ) { .completed($0) }
+        ) { $0 }
     }
 
     private func failAdmittedDelivery(
@@ -566,6 +630,7 @@ where Entitlement: Hashable & Sendable {
         await finiteTasks.waitForAll()
         await entitlements.sealAndDrain()
         await core.finishInputAndDrain()
+        await unrecognizedSubscriptions.sealAndDrain()
         await failures.sealAndDrain()
         delegate.release()
         producerCancellation.removeAll()
@@ -578,6 +643,7 @@ where Entitlement: Hashable & Sendable {
         restoreCoordinator.cancelSynchronously()
         core.cancelSynchronously()
         entitlements.cancelSynchronously()
+        unrecognizedSubscriptions.cancelSynchronously()
         failures.cancelSynchronously()
     }
 
@@ -670,6 +736,19 @@ where Entitlement: Hashable & Sendable {
             )
         }
         return publicError
+    }
+
+    private func causalTransactionFailure(
+        snapshot: StoreTransactionSnapshot,
+        disposition: TransactionProcessingDisposition,
+        error: any Error
+    ) -> any Error {
+        switch disposition {
+        case .finish:
+            completedTransactionFailure(snapshot: snapshot, error: error)
+        case .leaveUnfinished:
+            error
+        }
     }
 
     private func exposedError(_ error: any Error) -> any Error {

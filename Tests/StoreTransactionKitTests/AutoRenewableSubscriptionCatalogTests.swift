@@ -26,47 +26,42 @@ struct AutoRenewableSubscriptionCatalogTests {
             productID: CountingPlans.ProductID.monthly.rawValue,
             subscriptionGroupID: CountingPlans.id.rawValue
         )
-        #expect(try catalog.classification(of: transaction) == .managed)
         #expect(
-            try catalog.activeEntitlements(
-                in: StoreEntitlements(transactions: [transaction])
-            ) == [.tier1]
+            try catalog.classification(of: transaction)
+                == .declared(.tier1)
         )
         #expect(countingSubscriptionsAccessCount.withLock { $0 } == 1)
     }
 
-    @Test("monthly and yearly products project to their declared entitlements")
-    func projectsDeclaredEntitlements() throws {
+    @Test("monthly and yearly products classify with their declared entitlements")
+    func classifiesDeclaredEntitlements() throws {
         let catalog = AutoRenewableSubscriptionCatalog(Plans.self)
-        let entitlements = StoreEntitlements(
-            transactions: [
-                subscriptionSnapshot(
-                    id: 1,
-                    productID: Plans.ProductID.tier1_Monthly.rawValue
-                ),
-                subscriptionSnapshot(
-                    id: 2,
-                    productID: Plans.ProductID.tier1_Yearly.rawValue
-                ),
-                subscriptionSnapshot(
-                    id: 3,
-                    productID: Plans.ProductID.tier2_Monthly.rawValue
-                ),
-                subscriptionSnapshot(
-                    id: 4,
-                    productID: Plans.ProductID.tier2_Yearly.rawValue
-                ),
-            ]
-        )
+        let classifications = try [
+            Plans.ProductID.tier1_Monthly,
+            .tier1_Yearly,
+            .tier2_Monthly,
+            .tier2_Yearly,
+        ].enumerated().map { offset, productID in
+            try catalog.classification(
+                of: subscriptionSnapshot(
+                    id: UInt64(offset + 1),
+                    productID: productID.rawValue
+                )
+            )
+        }
 
         #expect(
-            try catalog.activeEntitlements(in: entitlements)
-                == [.tier1, .tier2]
+            classifications == [
+                .declared(.tier1),
+                .declared(.tier1),
+                .declared(.tier2),
+                .declared(.tier2),
+            ]
         )
     }
 
-    @Test("an upgraded declared product remains managed without granting access")
-    func upgradedDeclaredProductDoesNotGrantAccess() throws {
+    @Test("an upgraded declared product remains declared")
+    func upgradedDeclaredProductRemainsDeclared() throws {
         let catalog = AutoRenewableSubscriptionCatalog(Plans.self)
         let transaction = subscriptionSnapshot(
             id: 5,
@@ -74,16 +69,14 @@ struct AutoRenewableSubscriptionCatalogTests {
             isUpgraded: true
         )
 
-        #expect(try catalog.classification(of: transaction) == .managed)
         #expect(
-            try catalog.activeEntitlements(
-                in: StoreEntitlements(transactions: [transaction])
-            ).isEmpty
+            try catalog.classification(of: transaction)
+                == .declared(.tier1)
         )
     }
 
-    @Test("a retired upgraded product remains managed without granting access")
-    func retiredUpgradedProductDoesNotGrantAccess() throws {
+    @Test("a retired upgraded product has a non-projecting classification")
+    func retiredUpgradedProductIsClassified() throws {
         let catalog = AutoRenewableSubscriptionCatalog(Plans.self)
         let transaction = subscriptionSnapshot(
             id: 6,
@@ -91,11 +84,9 @@ struct AutoRenewableSubscriptionCatalogTests {
             isUpgraded: true
         )
 
-        #expect(try catalog.classification(of: transaction) == .managed)
         #expect(
-            try catalog.activeEntitlements(
-                in: StoreEntitlements(transactions: [transaction])
-            ).isEmpty
+            try catalog.classification(of: transaction)
+                == .retiredUpgraded
         )
     }
 
@@ -109,11 +100,6 @@ struct AutoRenewableSubscriptionCatalogTests {
         )
 
         #expect(try catalog.classification(of: transaction) == .unmanaged)
-        #expect(
-            try catalog.activeEntitlements(
-                in: StoreEntitlements(transactions: [transaction])
-            ).isEmpty
-        )
     }
 
     @Test("a declared product with a wrong StoreKit type fails validation")
@@ -122,18 +108,14 @@ struct AutoRenewableSubscriptionCatalogTests {
         let productID = Plans.ProductID.tier1_Monthly.rawValue
 
         do {
-            _ = try catalog.activeEntitlements(
-                in: StoreEntitlements(
-                    transactions: [
-                        subscriptionSnapshot(
-                            id: 8,
-                            productID: productID,
-                            productType: .nonConsumable
-                        )
-                    ]
+            _ = try catalog.classification(
+                of: subscriptionSnapshot(
+                    id: 8,
+                    productID: productID,
+                    productType: .nonConsumable
                 )
             )
-            Issue.record("Projection unexpectedly accepted a non-consumable product.")
+            Issue.record("Classification unexpectedly accepted a non-consumable product.")
         } catch let error {
             guard case let .productTypeMismatch(actualProductID, actual) = error else {
                 Issue.record("Unexpected catalog error: \(error)")
@@ -177,37 +159,19 @@ struct AutoRenewableSubscriptionCatalogTests {
         }
     }
 
-    @Test("an undeclared current product in the managed group fails validation")
-    func undeclaredCurrentProduct() {
+    @Test("an undeclared current product in the managed group is unrecognized")
+    func undeclaredCurrentProductIsUnrecognized() throws {
         let catalog = AutoRenewableSubscriptionCatalog(Plans.self)
         let productID = "com.example.subscription.undeclared"
 
-        do {
-            _ = try catalog.activeEntitlements(
-                in: StoreEntitlements(
-                    transactions: [
-                        subscriptionSnapshot(
-                            id: 10,
-                            productID: productID
-                        )
-                    ]
+        #expect(
+            try catalog.classification(
+                of: subscriptionSnapshot(
+                    id: 10,
+                    productID: productID
                 )
-            )
-            Issue.record("Projection unexpectedly accepted an undeclared product.")
-        } catch let error {
-            guard
-                case let .undeclaredProduct(
-                    actualProductID,
-                    subscriptionGroupID
-                ) = error
-            else {
-                Issue.record("Unexpected catalog error: \(error)")
-                return
-            }
-
-            #expect(actualProductID == productID)
-            #expect(subscriptionGroupID == Plans.id)
-        }
+            ) == .unrecognized
+        )
     }
 
     @Test("an undeclared upgraded product still requires an auto-renewable type")
@@ -236,31 +200,27 @@ struct AutoRenewableSubscriptionCatalogTests {
         }
     }
 
-    @Test("projection validates the complete candidate before returning a set")
-    func projectionIsAllOrNothing() {
+    @Test("an unrecognized current product still requires an auto-renewable type")
+    func unrecognizedProductTypeMismatch() {
         let catalog = AutoRenewableSubscriptionCatalog(Plans.self)
+        let productID = "com.example.subscription.undeclared"
 
         do {
-            _ = try catalog.activeEntitlements(
-                in: StoreEntitlements(
-                    transactions: [
-                        subscriptionSnapshot(
-                            id: 12,
-                            productID: Plans.ProductID.tier1_Monthly.rawValue
-                        ),
-                        subscriptionSnapshot(
-                            id: 13,
-                            productID: "com.example.subscription.undeclared"
-                        ),
-                    ]
+            _ = try catalog.classification(
+                of: subscriptionSnapshot(
+                    id: 12,
+                    productID: productID,
+                    productType: .nonRenewable
                 )
             )
-            Issue.record("Projection unexpectedly returned a partial set.")
+            Issue.record("Classification unexpectedly accepted the wrong type.")
         } catch let error {
-            guard case .undeclaredProduct = error else {
+            guard case let .productTypeMismatch(actualProductID, actual) = error else {
                 Issue.record("Unexpected catalog error: \(error)")
                 return
             }
+            #expect(actualProductID == productID)
+            #expect(actual == .nonRenewable)
         }
     }
 

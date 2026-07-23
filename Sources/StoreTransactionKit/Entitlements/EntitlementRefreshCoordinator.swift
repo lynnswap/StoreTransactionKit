@@ -45,9 +45,7 @@ where Entitlement: Hashable & Sendable {
     }
 
     private let query: @Sendable (Bool) async throws -> CurrentEntitlementReconciliation
-    private let project:
-        @Sendable (StoreEntitlements) throws(AutoRenewableSubscriptionCatalogError)
-            -> Set<Entitlement>
+    private let project: @Sendable (StoreEntitlements) async throws -> Set<Entitlement>
     private let didComplete: @Sendable (EntitlementRefreshOutcome<Entitlement>) async -> Void
     private let failures: FailureReporterDispatcher
     private let lifetime: TransactionStoreLifecycle?
@@ -63,7 +61,7 @@ where Entitlement: Hashable & Sendable {
             @escaping @Sendable (Bool) async throws
             -> CurrentEntitlementReconciliation,
         project:
-            @escaping @Sendable (StoreEntitlements) throws(AutoRenewableSubscriptionCatalogError)
+            @escaping @Sendable (StoreEntitlements) async throws
             -> Set<Entitlement>,
         didComplete:
             @escaping @Sendable (EntitlementRefreshOutcome<Entitlement>) async
@@ -261,7 +259,7 @@ where Entitlement: Hashable & Sendable {
             )
             let publication = EntitlementPublication(
                 entitlements: entitlements,
-                activeEntitlements: try project(entitlements)
+                activeEntitlements: try await project(entitlements)
             )
             current = entitlements
             await didComplete(.success(publication))
@@ -271,14 +269,17 @@ where Entitlement: Hashable & Sendable {
             for reservation in reservations {
                 reservation.receipt.succeed(publication)
             }
-        } catch let error {
-            await didComplete(.catalogFailure(error))
-            for claim in reconciliation.causalClaims {
-                await claim.fail(error)
-            }
-            for reservation in reservations {
-                reservation.receipt.fail(error)
-            }
+        } catch {
+            await commitFailure(
+                error,
+                causalFailures: reconciliation.causalClaims.map {
+                    CurrentEntitlementCausalFailure(
+                        claim: $0,
+                        error: error
+                    )
+                },
+                reservationReceipts: reservations.map(\.receipt)
+            )
         }
         await report(reconciliation.diagnostics)
     }

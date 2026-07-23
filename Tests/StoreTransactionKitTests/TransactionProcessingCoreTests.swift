@@ -14,6 +14,7 @@ struct TransactionProcessingCoreTests {
             await handlerStarted.send()
             try await gate.wait()
             await events.append("handle-end")
+            return .finish
         }
         let snapshot = makeSnapshot(id: 1)
         let acceptance = await core.accept(
@@ -44,6 +45,7 @@ struct TransactionProcessingCoreTests {
         let core = TransactionProcessingCore<StoreTransactionSnapshot> { _ in
             await started.send()
             try await gate.wait()
+            return .finish
         }
         let acceptance = await core.accept(
             makeEnvelope(snapshot: makeSnapshot(id: 101))
@@ -69,6 +71,7 @@ struct TransactionProcessingCoreTests {
             if await attempts.value() == 1 {
                 throw TestFailure()
             }
+            return .finish
         }
         let snapshot = makeSnapshot(id: 2)
         let envelope = makeEnvelope(snapshot: snapshot) {
@@ -141,6 +144,7 @@ struct TransactionProcessingCoreTests {
             await handles.send()
             await handlerStarted.send()
             try await handlerGate.wait()
+            return .finish
         }
         let snapshot = makeSnapshot(id: 3)
         let first = await core.accept(
@@ -198,6 +202,7 @@ struct TransactionProcessingCoreTests {
                 await firstStarted.send()
                 try await firstGate.wait()
             }
+            return .finish
         }
         let first = await core.accept(
             makeEnvelope(snapshot: makeSnapshot(id: 1)) {
@@ -224,6 +229,48 @@ struct TransactionProcessingCoreTests {
             await events.snapshot() == [
                 "handle-1", "finish-1", "handle-2", "finish-2",
             ])
+        await core.finishInputAndDrain()
+    }
+
+    @Test("leaving unfinished skips finish and permits a later processing attempt")
+    func leaveUnfinishedIsRetryable() async throws {
+        let handles = TestSignal()
+        let finishes = TestSignal()
+        let core = TransactionProcessingCore<StoreTransactionSnapshot> { _ in
+            await handles.send()
+            return .leaveUnfinished
+        }
+        let snapshot = makeSnapshot(id: 4)
+        let envelope = makeEnvelope(snapshot: snapshot) {
+            await finishes.send()
+        }
+
+        let first = await core.accept(envelope)
+        let firstClaim = try #require(
+            await first.claimCausalResolutionIfOwner()
+        )
+        #expect(
+            try await first.receipt.terminalValue() == .leaveUnfinished
+        )
+        await firstClaim.succeed()
+        #expect(
+            try await first.causalReceipt.terminalValue()
+                == .leaveUnfinished
+        )
+
+        let second = await core.accept(envelope)
+        let secondClaim = try #require(
+            await second.claimCausalResolutionIfOwner()
+        )
+        #expect(
+            try await second.receipt.terminalValue() == .leaveUnfinished
+        )
+        await secondClaim.succeed()
+
+        #expect(first.role == .owner)
+        #expect(second.role == .owner)
+        #expect(await handles.value() == 2)
+        #expect(await finishes.value() == 0)
         await core.finishInputAndDrain()
     }
 }

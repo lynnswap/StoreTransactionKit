@@ -15,7 +15,9 @@ public protocol AutoRenewableSubscriptionGroup<Entitlement> {
     /// The group's identifier in App Store Connect.
     static var id: SubscriptionGroupID { get }
 
-    /// The complete set of declared products and the entitlement each one grants.
+    /// The complete entitlement mapping known to this binary.
+    ///
+    /// The live App Store Connect group may contain additional Product IDs.
     @StoreSubscriptionsBuilder<
         Self.ProductID,
         Self.Entitlement
