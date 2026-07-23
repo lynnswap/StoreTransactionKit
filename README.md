@@ -202,9 +202,10 @@ let store = TransactionStore(
 ## Unrecognized subscriptions
 
 A non-upgraded product added to the same subscription group after this binary
-ships can still arrive through another device or purchase path. By default, the
-store keeps the verified raw transaction, grants no typed entitlement, and
-leaves an unfinished delivery unfinished.
+ships can still arrive after a plan change in Manage Subscriptions, an offer
+code or win-back offer redeemed through the App Store, or a purchase on another
+device. By default, the store keeps the verified raw transaction, grants no
+typed entitlement, and leaves an unfinished delivery unfinished.
 
 Supply a separate delegate only when the app knows how to handle that product:
 
