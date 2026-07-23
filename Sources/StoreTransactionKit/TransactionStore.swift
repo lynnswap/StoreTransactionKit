@@ -303,6 +303,29 @@ where Entitlement: Hashable & Sendable {
         )
     }
 
+    package func refreshSyntheticEntitlements<AdmissionResult: Sendable>(
+        didAdmit: () throws -> AdmissionResult
+    ) async throws -> AdmissionResult {
+        try Task.checkCancellation()
+        try rejectReentrancy(operation: .refreshEntitlements)
+        guard case .syntheticRuntime(let runtime, let lifecycle, _) = backend else {
+            preconditionFailure(
+                "Synthetic entitlement mutation requires a synthetic TransactionStore."
+            )
+        }
+        let leases = try lifecycle.beginOperation()
+        let admissionResult: AdmissionResult
+        do {
+            admissionResult = try didAdmit()
+        } catch {
+            leases.work.end()
+            leases.observer.end()
+            throw error
+        }
+        _ = try await runtime.currentEntitlements(leases: leases)
+        return admissionResult
+    }
+
     /// Reconciles unfinished transactions and publishes current entitlements.
     ///
     /// Raw and typed entitlement values are validated and committed atomically.
@@ -316,7 +339,8 @@ where Entitlement: Hashable & Sendable {
 
     /// Returns verified transaction history for one product.
     ///
-    /// Results are all-or-nothing and ordered newest first.
+    /// Results are all-or-nothing and ordered newest first. A verification
+    /// failure throws without returning partial results.
     public func history(
         for productID: Product.ID
     ) async throws -> [StoreTransactionSnapshot] {

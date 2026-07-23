@@ -4,21 +4,50 @@ import StoreTransactionKit
 
 @MainActor
 final class SyntheticTransactionLedger: Sendable {
+    enum CurrentEntitlementEffect: Equatable, Sendable {
+        case none
+        case replaceActiveSubscription
+    }
+
+    private struct Registration: Sendable {
+        let snapshot: StoreTransactionSnapshot
+        let currentEntitlementEffect: CurrentEntitlementEffect
+    }
+
+    private enum CurrentSubscriptionState: Sendable {
+        case empty(latestTransactionID: UInt64?)
+        case active(StoreTransactionSnapshot)
+
+        var latestTransactionID: UInt64? {
+            switch self {
+            case .empty(let latestTransactionID):
+                latestTransactionID
+            case .active(let snapshot):
+                snapshot.id
+            }
+        }
+    }
+
     private var nextTransactionID: UInt64 = 1
-    private var registeredSnapshots: [UInt64: StoreTransactionSnapshot] = [:]
-    private var activeSnapshot: StoreTransactionSnapshot?
+    private var registrations: [UInt64: Registration] = [:]
+    private var currentSubscription: CurrentSubscriptionState =
+        .empty(latestTransactionID: nil)
 
     func snapshots() -> [StoreTransactionSnapshot] {
-        if let activeSnapshot {
-            [activeSnapshot]
-        } else {
+        switch currentSubscription {
+        case .empty:
             []
+        case .active(let snapshot):
+            [snapshot]
         }
     }
 
     func makeRegisteredSnapshot(
         productID: String,
-        subscriptionGroupID: SubscriptionGroupID
+        productType: Product.ProductType,
+        subscriptionGroupID: SubscriptionGroupID?,
+        isUpgraded: Bool = false,
+        currentEntitlementEffect: CurrentEntitlementEffect
     ) -> StoreTransactionSnapshot {
         precondition(
             nextTransactionID < .max,
@@ -32,8 +61,8 @@ final class SyntheticTransactionLedger: Sendable {
             id: transactionID,
             originalID: transactionID,
             productID: productID,
-            subscriptionGroupID: subscriptionGroupID.rawValue,
-            productType: .autoRenewable,
+            subscriptionGroupID: subscriptionGroupID?.rawValue,
+            productType: productType,
             environment: .xcode,
             offer: nil,
             storefrontID: "143441",
@@ -46,7 +75,7 @@ final class SyntheticTransactionLedger: Sendable {
             revocationDate: nil,
             revocationReason: nil,
             purchasedQuantity: 1,
-            isUpgraded: false,
+            isUpgraded: isUpgraded,
             ownershipType: .purchased,
             reason: .purchase,
             appAccountToken: nil,
@@ -54,23 +83,47 @@ final class SyntheticTransactionLedger: Sendable {
             jwsRepresentation:
                 "StoreTransactionKitTesting.synthetic.\(transactionID)"
         )
-        precondition(registeredSnapshots[transactionID] == nil)
-        registeredSnapshots[transactionID] = snapshot
+        precondition(registrations[transactionID] == nil)
+        registrations[transactionID] = Registration(
+            snapshot: snapshot,
+            currentEntitlementEffect: currentEntitlementEffect
+        )
         return snapshot
     }
 
     func contains(_ snapshot: StoreTransactionSnapshot) -> Bool {
-        registeredSnapshots[snapshot.id] == snapshot
+        registrations[snapshot.id]?.snapshot == snapshot
     }
 
-    func activate(_ snapshot: StoreTransactionSnapshot) {
-        precondition(
-            contains(snapshot),
-            "Only a transaction registered by this test harness can become current."
-        )
-        guard activeSnapshot.map({ $0.id <= snapshot.id }) ?? true else {
+    func applyDeliveryEffect(for snapshot: StoreTransactionSnapshot) {
+        guard let registration = registrations[snapshot.id],
+            registration.snapshot == snapshot
+        else {
+            preconditionFailure(
+                "Only an exact transaction registered by this test harness can be delivered."
+            )
+        }
+        guard
+            registration.currentEntitlementEffect
+                == .replaceActiveSubscription
+        else {
             return
         }
-        activeSnapshot = snapshot
+        guard
+            currentSubscription.latestTransactionID.map({
+                $0 < snapshot.id
+            }) ?? true
+        else {
+            return
+        }
+        currentSubscription = .active(snapshot)
+    }
+
+    func expireActiveSubscription() -> StoreTransactionSnapshot? {
+        guard case .active(let snapshot) = currentSubscription else {
+            return nil
+        }
+        currentSubscription = .empty(latestTransactionID: snapshot.id)
+        return snapshot
     }
 }
