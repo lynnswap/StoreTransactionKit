@@ -174,6 +174,39 @@ struct RuntimeContractCoverageTests {
     }
 
     @MainActor
+    @Test("an attached restore synchronization failure returns directly and can retry")
+    func attachedRestoreSynchronizationFailureCanRetry() async throws {
+        let synchronization = ControlledSynchronization()
+        let delegate = RecordingFailureDelegate()
+        let fixture = TestSourceFixture(
+            synchronize: { try await synchronization.run() }
+        )
+        let store = TransactionStore(
+            source: fixture.source,
+            subscriptionCatalog: testSubscriptionCatalog,
+            delegate: delegate
+        )
+        try await store.waitForInitialReadiness()
+
+        let first = Task { @MainActor in try await store.restorePurchases() }
+        try await synchronization.waitForAttempt(1)
+        await synchronization.failNext(TestFailure())
+        await #expect(throws: TestFailure.self) {
+            _ = try await first.value
+        }
+
+        let retry = Task { @MainActor in try await store.restorePurchases() }
+        try await synchronization.waitForAttempt(2)
+        await synchronization.succeedNext()
+        let restored = try await retry.value
+
+        #expect(restored.transactions.isEmpty)
+        #expect(await synchronization.attemptCount() == 2)
+        #expect((await delegate.failures()).isEmpty)
+        try await store.close()
+    }
+
+    @MainActor
     @Test("an abandoned restore reports once and a later restore retries synchronization")
     func abandonedRestoreReportsOnceAndRetries() async throws {
         let synchronization = ControlledSynchronization()
