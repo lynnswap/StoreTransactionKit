@@ -90,7 +90,8 @@ try await withTransactionStoreTestHarness(
 
 `purchase(_:,in:)` remains the typed shortcut for a catalog-declared product.
 `deliver(_:)` accepts only an exact synthetic snapshot registered by that
-harness.
+harness. Replaying an older revision does not replace a later synthetic
+subscription that is already current.
 
 The returned ``StoreTransactionSnapshot`` is synthetic. Its
 ``StoreTransactionSnapshot/jwsRepresentation`` is a deterministic sentinel, not

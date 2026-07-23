@@ -185,6 +185,45 @@ struct TransactionStoreTestHarnessTests {
     }
 
     @MainActor
+    @Test("replaying an older revision does not replace a later subscription")
+    func olderUnrecognizedReplayPreservesCurrentSubscription() async throws {
+        let delegate = HarnessUnrecognizedDelegate(policy: .treatAs(.tier1))
+
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog,
+            unrecognizedSubscriptionDelegate: delegate
+        ) { harness in
+            let older = try harness.makeUnrecognizedSubscription(
+                productID: "testing.subscription.legacy",
+                in: HarnessPlans.self
+            )
+            #expect(
+                try await harness.deliver(older)
+                    == .completed(older)
+            )
+
+            let current = try await harness.purchase(
+                .tier2_Monthly,
+                in: HarnessPlans.self
+            )
+            #expect(harness.store.entitlements?.transactions == [current])
+            #expect(harness.store.activeEntitlements == [.tier2])
+
+            #expect(
+                try await harness.deliver(older)
+                    == .completed(older)
+            )
+            #expect(harness.store.entitlements?.transactions == [current])
+            #expect(harness.store.activeEntitlements == [.tier2])
+
+            let refreshed = try await harness.store.refreshEntitlements()
+            #expect(refreshed.transactions == [current])
+            #expect(harness.store.activeEntitlements == [.tier2])
+            #expect(await delegate.decisionCount() == 1)
+        }
+    }
+
+    @MainActor
     @Test("a thrown decision can retry the same registered revision")
     func unrecognizedDecisionRetry() async throws {
         let delegate = HarnessUnrecognizedDelegate { _, attempt in

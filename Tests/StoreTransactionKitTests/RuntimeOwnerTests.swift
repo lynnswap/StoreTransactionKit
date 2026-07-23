@@ -432,6 +432,43 @@ struct RuntimeOwnerTests {
     }
 
     @MainActor
+    @Test("rejected synthetic delivery does not cross its admission boundary")
+    func rejectedSyntheticDeliveryDoesNotRunAdmissionEffect() async throws {
+        let snapshot = makeSubscriptionSnapshot(
+            id: 26,
+            productID: .tier1Monthly,
+            revision: "synthetic-rejected-26"
+        )
+        let didAdmit = TestSignal()
+        let store = TransactionStore(
+            subscriptionCatalog: testSubscriptionCatalog,
+            syntheticSource: SyntheticStoreTransactionSource(
+                currentEntitlements: { [] }
+            ),
+            unavailableOperationError: {
+                SyntheticOperationError(operation: $0)
+            }
+        )
+        try await store.waitForInitialReadiness()
+        try await store.close()
+
+        do {
+            _ = try await store.processSyntheticDelivery(
+                .synthetic(
+                    snapshot: snapshot,
+                    acknowledge: {}
+                ),
+                didAdmit: {
+                    await didAdmit.send()
+                }
+            )
+            Issue.record("A closed synthetic store admitted a delivery.")
+        } catch StoreTransactionError.closed {}
+
+        #expect(await didAdmit.value() == 0)
+    }
+
+    @MainActor
     @Test(
         "delegate decisions reject direct and inherited-child reentrancy",
         arguments: [ReentryMode.direct, .child]

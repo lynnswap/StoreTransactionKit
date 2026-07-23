@@ -90,11 +90,12 @@ where Entitlement: Hashable & Sendable {
 
     /// Delivers an exact synthetic snapshot value registered by this harness.
     ///
-    /// Delivery first makes the revision authoritative for current-entitlement
-    /// reconciliation, then runs the production policy and publication path.
-    /// Re-delivering the same revision exercises the store's session policy and
-    /// acknowledgement idempotency. A value not exactly registered by this
-    /// harness throws ``TransactionStoreTestHarnessError/unregisteredTransaction(transactionID:)``
+    /// After admission, delivery makes the revision current unless a later
+    /// synthetic transaction is already current, then runs the production
+    /// policy and publication path. Re-delivering the same revision exercises
+    /// the store's session policy and acknowledgement idempotency without
+    /// rolling back a later subscription. A value not exactly registered by
+    /// this harness throws ``TransactionStoreTestHarnessError/unregisteredTransaction(transactionID:)``
     /// before changing the synthetic current-entitlement source.
     @discardableResult
     public func deliver(
@@ -107,9 +108,12 @@ where Entitlement: Hashable & Sendable {
         }
 
         try Task.checkCancellation()
-        ledger.activate(transaction)
         return try await store.processSyntheticDelivery(
-            .synthetic(snapshot: transaction) { [ledger] in
+            .synthetic(
+                snapshot: transaction,
+                acknowledge: {}
+            ),
+            didAdmit: { [ledger] in
                 await ledger.activate(transaction)
             }
         )

@@ -95,8 +95,9 @@ where Entitlement: Hashable & Sendable {
     /// reconciliation. The store strongly retains both delegates until terminal
     /// shutdown. Creating a second live store in the same process before the
     /// first store finishes ``close()`` is a programmer error. Without
-    /// `unrecognizedSubscriptionDelegate`, valid undeclared same-group
-    /// subscriptions use ``UnrecognizedSubscriptionPolicy/leaveUnfinished``.
+    /// `unrecognizedSubscriptionDelegate`, valid non-upgraded undeclared
+    /// same-group subscriptions use
+    /// ``UnrecognizedSubscriptionPolicy/leaveUnfinished``.
     public convenience init(
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
         delegate: (any TransactionStoreDelegate)? = nil,
@@ -285,7 +286,8 @@ where Entitlement: Hashable & Sendable {
     }
 
     package func processSyntheticDelivery(
-        _ delivery: StoreTransactionDelivery
+        _ delivery: StoreTransactionDelivery,
+        didAdmit: @escaping @Sendable () async -> Void = {}
     ) async throws -> StorePurchaseOutcome {
         try rejectReentrancy(operation: .processPurchase)
         guard case .syntheticRuntime(let runtime, let lifecycle, _) = backend else {
@@ -294,7 +296,11 @@ where Entitlement: Hashable & Sendable {
             )
         }
         let leases = try lifecycle.beginOperation()
-        return try await runtime.process(delivery, leases: leases)
+        return try await runtime.process(
+            delivery,
+            leases: leases,
+            didAdmit: didAdmit
+        )
     }
 
     /// Reconciles unfinished transactions and publishes current entitlements.

@@ -68,6 +68,9 @@ final class SyntheticTransactionLedger: Sendable {
             contains(snapshot),
             "Only a transaction registered by this test harness can become current."
         )
+        guard activeSnapshot.map({ $0.id <= snapshot.id }) ?? true else {
+            return
+        }
         activeSnapshot = snapshot
     }
 }
