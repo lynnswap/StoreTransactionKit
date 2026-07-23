@@ -1,4 +1,5 @@
 import StoreTransactionKit
+import StoreKit
 
 public enum SubscriptionEntitlement: Hashable, Sendable {
     case tier1
@@ -26,6 +27,26 @@ public enum Plans: AutoRenewableSubscriptionGroup<SubscriptionEntitlement> {
 }
 
 public let subscriptionCatalog = AutoRenewableSubscriptionCatalog(Plans.self)
+
+public let subscriptionProductIDs = subscriptionCatalog.productIDs
+
+public func loadDeclaredSubscriptionProducts() async throws -> [Product] {
+    try await Product.products(for: subscriptionCatalog.productIDs)
+}
+
+public func loadSubscriptionStatuses() async throws
+    -> [Product.SubscriptionInfo.Status]
+{
+    try await Product.SubscriptionInfo.status(
+        for: subscriptionCatalog.subscriptionGroupID.rawValue
+    )
+}
+
+public func entitlement(
+    for productID: String
+) -> SubscriptionEntitlement? {
+    subscriptionCatalog.entitlement(for: productID)
+}
 
 public let legacySubscriptionProductID =
     "external-consumer.subscription.legacy"
