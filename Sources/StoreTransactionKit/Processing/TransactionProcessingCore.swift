@@ -10,8 +10,7 @@ package struct TransactionCausalResolutionClaim<Value: Sendable>: Sendable {
     package let reportingAuthority: DirectOperationReportingAuthority
 
     private let receipt: ProcessingReceipt<TransactionProcessingDisposition>
-    private let finishSuccess:
-        @Sendable () async -> TransactionProcessingDisposition
+    private let finishSuccess: @Sendable () async -> TransactionProcessingDisposition
     private let finishFailure: @Sendable () async -> Void
 
     fileprivate init(
@@ -52,8 +51,7 @@ package struct ProcessingAcceptance<Value: Sendable>: Sendable {
     package let receipt: ProcessingReceipt<TransactionProcessingDisposition>
 
     /// Completes after the exact revision's causal entitlement publication.
-    package let causalReceipt:
-        ProcessingReceipt<TransactionProcessingDisposition>
+    package let causalReceipt: ProcessingReceipt<TransactionProcessingDisposition>
     package let role: Role
     package let reportingAuthority: DirectOperationReportingAuthority
     package let directBinding: DirectOperationObservation.Binding?
@@ -95,10 +93,8 @@ package actor TransactionProcessingCore<Value: Sendable> {
     private struct Attempt: Sendable {
         let id: UUID
         let value: Value
-        let decisionReceipt:
-            ProcessingReceipt<TransactionProcessingDisposition>
-        let causalReceipt:
-            ProcessingReceipt<TransactionProcessingDisposition>
+        let decisionReceipt: ProcessingReceipt<TransactionProcessingDisposition>
+        let causalReceipt: ProcessingReceipt<TransactionProcessingDisposition>
         let reportingAuthority: DirectOperationReportingAuthority
         var causalResolutionClaimed: Bool
         var phase: AttemptPhase
@@ -111,8 +107,7 @@ package actor TransactionProcessingCore<Value: Sendable> {
 
     private let sessionID: UUID
     private let lifetime: TransactionStoreLifecycle?
-    private let handle:
-        @Sendable (Value) async throws -> TransactionProcessingDisposition
+    private let handle: @Sendable (Value) async throws -> TransactionProcessingDisposition
     private var queue: [QueuedOperation] = []
     private var inFlight: [Data: Attempt] = [:]
     private var failed: [Data: Attempt] = [:]
@@ -249,7 +244,7 @@ package actor TransactionProcessingCore<Value: Sendable> {
         value: Value,
         decisionReceipt:
             ProcessingReceipt<TransactionProcessingDisposition> =
-                ProcessingReceipt<TransactionProcessingDisposition>(),
+            ProcessingReceipt<TransactionProcessingDisposition>(),
         alreadyFinished: Bool = false
     ) -> Attempt {
         Attempt(

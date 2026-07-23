@@ -16,8 +16,7 @@ where Entitlement: Hashable & Sendable {
     private let source: StoreTransactionSource
     private let lifecycle: TransactionStoreLifecycle
     private let delegate: TransactionStoreDelegateReference
-    private let unrecognizedSubscriptions:
-        UnrecognizedSubscriptionPolicyResolver<Entitlement>
+    private let unrecognizedSubscriptions: UnrecognizedSubscriptionPolicyResolver<Entitlement>
     private let core: TransactionProcessingCore<StoreTransactionSnapshot>
     private let entitlements: EntitlementRefreshCoordinator<Entitlement>
     private let failures: FailureReporterDispatcher
@@ -68,8 +67,7 @@ where Entitlement: Hashable & Sendable {
             sessionID: sessionID,
             lifetime: lifecycle,
             handle: { transaction in
-                let classification:
-                    AutoRenewableSubscriptionClassification<Entitlement>
+                let classification: AutoRenewableSubscriptionClassification<Entitlement>
                 do {
                     classification = try subscriptionCatalog.classification(
                         of: transaction
@@ -125,8 +123,7 @@ where Entitlement: Hashable & Sendable {
             project: { entitlements in
                 var activeEntitlements: Set<Entitlement> = []
                 for transaction in entitlements.transactions {
-                    let classification:
-                        AutoRenewableSubscriptionClassification<Entitlement>
+                    let classification: AutoRenewableSubscriptionClassification<Entitlement>
                     do {
                         classification = try subscriptionCatalog.classification(
                             of: transaction

@@ -536,7 +536,7 @@ private actor RecordingUnrecognizedDelegate:
 
     private let decide:
         @Sendable (StoreTransactionSnapshot, Int) async throws
-        -> TestUnrecognizedPolicy
+            -> TestUnrecognizedPolicy
     private var transactions: [StoreTransactionSnapshot] = []
 
     init(policy: TestUnrecognizedPolicy) {

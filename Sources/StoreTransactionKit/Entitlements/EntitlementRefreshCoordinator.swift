@@ -45,8 +45,7 @@ where Entitlement: Hashable & Sendable {
     }
 
     private let query: @Sendable (Bool) async throws -> CurrentEntitlementReconciliation
-    private let project:
-        @Sendable (StoreEntitlements) async throws -> Set<Entitlement>
+    private let project: @Sendable (StoreEntitlements) async throws -> Set<Entitlement>
     private let didComplete: @Sendable (EntitlementRefreshOutcome<Entitlement>) async -> Void
     private let failures: FailureReporterDispatcher
     private let lifetime: TransactionStoreLifecycle?
