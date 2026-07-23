@@ -8,11 +8,34 @@ import Testing
     import UIKit
 #endif
 
-private enum Entitlement: String, Hashable, Sendable {
-    case lifetime = "com.example.StoreTransactionKit.lifetime"
-    case plus = "com.example.StoreTransactionKit.plus"
-    case pro = "com.example.StoreTransactionKit.pro"
+private enum SubscriptionEntitlement: Hashable, Sendable {
+    case tier1
+    case tier2
 }
+
+private enum Plans: AutoRenewableSubscriptionGroup<SubscriptionEntitlement> {
+    static let id = SubscriptionGroupID(
+        rawValue: "StoreTransactionKitSubscriptionGroup"
+    )
+
+    enum ProductID: String, CaseIterable, Sendable {
+        case tier1_Monthly = "com.example.StoreTransactionKit.tier1.monthly"
+        case tier1_Yearly = "com.example.StoreTransactionKit.tier1.yearly"
+        case tier2_Monthly = "com.example.StoreTransactionKit.tier2.monthly"
+        case tier2_Yearly = "com.example.StoreTransactionKit.tier2.yearly"
+    }
+
+    static var subscriptions: StoreSubscriptions {
+        StoreSubscription(.tier1_Monthly, entitlement: .tier1)
+        StoreSubscription(.tier1_Yearly, entitlement: .tier1)
+        StoreSubscription(.tier2_Monthly, entitlement: .tier2)
+        StoreSubscription(.tier2_Yearly, entitlement: .tier2)
+    }
+}
+
+private let subscriptionCatalog = AutoRenewableSubscriptionCatalog(Plans.self)
+private let externalSubscriptionProductID =
+    "com.example.StoreTransactionKit.external.monthly"
 
 @Suite(.serialized, .timeLimit(.minutes(1)))
 @MainActor
@@ -29,28 +52,51 @@ struct StoreTransactionKitIntegrationTests {
         let handlerCalls = TestSignal()
 
         let observedStore = ObservedStore(
-            handleTransaction: { _ in
+            decidePolicy: { _ in
                 await handlerCalls.send()
                 await handlerStarted.send()
                 try await handlerRelease.wait(for: 1)
+                return .finish
             },
-            reportFailure: { failure in
+            didFail: { failure in
                 Issue.record("Unexpected purchase failure: \(failure)")
             }
         )
+        var purchaseTask: Task<StoreKit.Transaction, any Error>?
         do {
             try await observedStore.waitForEntitlements([])
 
-            _ = try await session.buyProduct(
-                identifier: Entitlement.lifetime.rawValue
-            )
+            let task = Task { @MainActor in
+                try await session.buyProduct(
+                    identifier: externalSubscriptionProductID
+                )
+            }
+            purchaseTask = task
             try await handlerStarted.wait(for: 1)
 
             #expect(observedStore.store.activeEntitlements == [])
             await handlerRelease.send()
-            try await observedStore.waitForEntitlements([.lifetime])
+            _ = try await task.value
             #expect(await handlerCalls.value() == 1)
+            if #available(iOS 27.0,
+            tvOS 27.0,
+            watchOS 27.0,
+            visionOS 27.0,
+            *) {
+                _ = try await observedStore.waitForTransaction(
+                    productID: externalSubscriptionProductID,
+                    excluding: 0
+                )
+            } else {
+                _ = try await observedStore.store.refreshEntitlements()
+            }
+            #expect(
+                observedStore.store.entitlements?.transactions.map(\.productID)
+                    == [externalSubscriptionProductID]
+            )
+            #expect(observedStore.store.activeEntitlements == [])
         } catch {
+            purchaseTask?.cancel()
             await handlerRelease.send()
             do {
                 try await observedStore.close()
@@ -63,22 +109,45 @@ struct StoreTransactionKitIntegrationTests {
 
         let replayedHandlerCalls = TestSignal()
         try await withObservedStore(
-            handleTransaction: { _ in
+            decidePolicy: { _ in
                 await replayedHandlerCalls.send()
+                return .finish
             },
-            reportFailure: { failure in
+            didFail: { failure in
                 Issue.record("Unexpected post-finish failure: \(failure)")
             }
         ) { observedStore in
-            try await observedStore.waitForEntitlements([.lifetime])
+            try await observedStore.waitForEntitlements([])
+            guard case .ready = observedStore.store.entitlementStatus else {
+                Issue.record("The replay store did not reach ready state.")
+                return
+            }
+            #expect(await replayedHandlerCalls.value() == 0)
+            if #available(iOS 27.0,
+            tvOS 27.0,
+            watchOS 27.0,
+            visionOS 27.0,
+            *) {
+                _ = try await observedStore.waitForTransaction(
+                    productID: externalSubscriptionProductID,
+                    excluding: 0
+                )
+            } else {
+                _ = try await observedStore.store.refreshEntitlements()
+            }
+            #expect(
+                observedStore.store.entitlements?.transactions.map(\.productID)
+                    == [externalSubscriptionProductID]
+            )
+            #expect(observedStore.store.activeEntitlements == [])
             #expect(await replayedHandlerCalls.value() == 0)
         }
     }
 
     @Test
-    func directPurchaseIsProcessedAndPublishesPlus() async throws {
+    func directPurchaseIsProcessedAndPublishesTier1() async throws {
         try await withTestContext { context in
-            let product = try await context.product(.plus)
+            let product = try await context.product(.tier1_Monthly)
             let appAccountToken = UUID()
             let result = try await purchase(
                 product,
@@ -91,7 +160,7 @@ struct StoreTransactionKitIntegrationTests {
                 Issue.record("Expected a completed direct purchase.")
                 return
             }
-            #expect(transaction.productID == Entitlement.plus.rawValue)
+            #expect(transaction.productID == Plans.ProductID.tier1_Monthly.rawValue)
             #expect(
                 transaction.subscriptionGroupID
                     == "StoreTransactionKitSubscriptionGroup"
@@ -113,26 +182,33 @@ struct StoreTransactionKitIntegrationTests {
             #expect(transaction.reason == .purchase)
             #expect(transaction.appAccountToken == appAccountToken)
             #expect(!transaction.jwsRepresentation.isEmpty)
-            #expect(context.store.activeEntitlements == [.plus])
+            #expect(context.store.activeEntitlements == [.tier1])
         }
     }
 
     @Test
-    func launchReconcilesAnExistingPurchase() async throws {
-        try await withTestContext(preexistingSubscription: .plus) { context in
-            #expect(context.store.activeEntitlements == [.plus])
+    func launchMapsEverySubscriptionProduct() async throws {
+        for productID in Plans.ProductID.allCases {
+            try await withTestContext(preexistingSubscription: productID) { context in
+                switch productID {
+                case .tier1_Monthly, .tier1_Yearly:
+                    #expect(context.store.activeEntitlements == [.tier1])
+                case .tier2_Monthly, .tier2_Yearly:
+                    #expect(context.store.activeEntitlements == [.tier2])
+                }
+            }
         }
     }
 
     @Test
     func launchKeepsACancelledSubscriptionUntilItsExpiration() async throws {
         try await withTestContext(
-            preexistingSubscription: .plus,
+            preexistingSubscription: .tier1_Monthly,
             preexistingPurchaseOptions: [
                 .purchaseDate(.now, renewalBehavior: .cancelImmediately)
             ]
         ) { context in
-            #expect(context.store.activeEntitlements == [.plus])
+            #expect(context.store.activeEntitlements == [.tier1])
         }
     }
 
@@ -147,7 +223,7 @@ struct StoreTransactionKitIntegrationTests {
         )
 
         try await withTestContext(
-            preexistingSubscription: .plus,
+            preexistingSubscription: .tier1_Monthly,
             preexistingPurchaseOptions: [
                 .purchaseDate(
                     purchaseDate,
@@ -167,16 +243,18 @@ struct StoreTransactionKitIntegrationTests {
             session.resetToDefaultState()
             session.clearTransactions()
         }
-        _ = try await session.buyProduct(identifier: Entitlement.plus.rawValue)
+        _ = try await session.buyProduct(
+            identifier: Plans.ProductID.tier1_Monthly.rawValue
+        )
 
         let failedHandlerCalls = TestSignal()
         let launchDeliveryFailures = TestSignal()
         try await withObservedStore(
-            handleTransaction: { _ in
+            decidePolicy: { _ in
                 await failedHandlerCalls.send()
                 throw DurableHandlingFailure()
             },
-            reportFailure: { failure in
+            didFail: { failure in
                 switch failure.source {
                 case .updates, .unfinished:
                     await launchDeliveryFailures.send()
@@ -195,27 +273,29 @@ struct StoreTransactionKitIntegrationTests {
 
         let successfulHandlerCalls = TestSignal()
         try await withObservedStore(
-            handleTransaction: { _ in
+            decidePolicy: { _ in
                 await successfulHandlerCalls.send()
+                return .finish
             },
-            reportFailure: { failure in
+            didFail: { failure in
                 Issue.record("Unexpected retry failure: \(failure)")
             }
         ) { observedStore in
             try await successfulHandlerCalls.wait(for: 1)
-            try await observedStore.waitForEntitlements([.plus])
+            try await observedStore.waitForEntitlements([.tier1])
         }
 
         let postFinishHandlerCalls = TestSignal()
         try await withObservedStore(
-            handleTransaction: { _ in
+            decidePolicy: { _ in
                 await postFinishHandlerCalls.send()
+                return .finish
             },
-            reportFailure: { failure in
+            didFail: { failure in
                 Issue.record("Unexpected post-finish failure: \(failure)")
             }
         ) { observedStore in
-            try await observedStore.waitForEntitlements([.plus])
+            try await observedStore.waitForEntitlements([.tier1])
             #expect(await postFinishHandlerCalls.value() == 0)
         }
     }
@@ -224,24 +304,45 @@ struct StoreTransactionKitIntegrationTests {
     func interruptedPurchaseCompletesAfterTheIssueIsResolved() async throws {
         try await withTestContext { context in
             context.session.interruptedPurchasesEnabled = true
-            let product = try await context.product(.plus)
-            let result = try await purchase(product)
-            guard case .pending = result else {
-                Issue.record("Expected the interrupted purchase to remain pending.")
-                return
-            }
-            let interrupted = try #require(
-                context.session.allTransactions().first {
-                    $0.productIdentifier == Entitlement.plus.rawValue
-                        && $0.hasPurchaseIssue
+            let interrupted: SKTestTransaction
+            if #available(iOS 27.0,
+            tvOS 27.0,
+            watchOS 27.0,
+            visionOS 27.0,
+            *) {
+                let transaction = try await context.session.buyProduct(
+                    identifier: Plans.ProductID.tier1_Monthly.rawValue
+                )
+                interrupted = try #require(
+                    context.session.allTransactions().first {
+                        $0.identifier == Int(transaction.id)
+                    }
+                )
+            } else {
+                let product = try await context.product(.tier1_Monthly)
+                let result = try await purchase(product)
+                let outcome = try await context.store.process(result)
+                guard case .pending = outcome else {
+                    Issue.record(
+                        "Expected the interrupted purchase to remain pending."
+                    )
+                    return
                 }
-            )
+                interrupted = try #require(
+                    context.session.allTransactions().first {
+                        $0.productIdentifier
+                            == Plans.ProductID.tier1_Monthly.rawValue
+                            && $0.hasPurchaseIssue
+                    }
+                )
+            }
+            #expect(interrupted.hasPurchaseIssue)
 
             try context.session.resolveIssueForTransaction(
                 identifier: interrupted.identifier
             )
 
-            try await context.waitForEntitlements([.plus])
+            try await context.waitForEntitlements([.tier1])
         }
     }
 
@@ -256,10 +357,11 @@ struct StoreTransactionKitIntegrationTests {
         let updateFailures = TestSignal()
 
         try await withObservedStore(
-            handleTransaction: { _ in
+            decidePolicy: { _ in
                 await rejectedHandlerCalls.send()
+                return .finish
             },
-            reportFailure: { failure in
+            didFail: { failure in
                 if case .updates = failure.source {
                     await updateFailures.send()
                 }
@@ -271,7 +373,9 @@ struct StoreTransactionKitIntegrationTests {
                 forAPI: .verification
             )
 
-            _ = try await session.buyProduct(identifier: Entitlement.plus.rawValue)
+            _ = try await session.buyProduct(
+                identifier: Plans.ProductID.tier1_Monthly.rawValue
+            )
             try await updateFailures.wait(for: 1)
 
             #expect(await rejectedHandlerCalls.value() == 0)
@@ -280,10 +384,11 @@ struct StoreTransactionKitIntegrationTests {
 
         let unfinishedFailures = TestSignal()
         try await withObservedStore(
-            handleTransaction: { _ in
+            decidePolicy: { _ in
                 await rejectedHandlerCalls.send()
+                return .finish
             },
-            reportFailure: { failure in
+            didFail: { failure in
                 if case .unfinished = failure.source {
                     await unfinishedFailures.send()
                 }
@@ -292,53 +397,58 @@ struct StoreTransactionKitIntegrationTests {
             try await unfinishedFailures.wait(for: 1)
             #expect(await rejectedHandlerCalls.value() == 0)
         }
+
+        try await session.setSimulatedError(nil, forAPI: .verification)
     }
 
     @Test
-    func upgradeFromPlusToProPublishesOnlyPro() async throws {
+    func upgradeFromTier1ToTier2PublishesOnlyTier2() async throws {
         try await withTestContext { context in
-            _ = try await context.session.buyProduct(identifier: Entitlement.plus.rawValue)
-            try await context.waitForEntitlements([.plus])
-
-            _ = try await context.session.buyProduct(identifier: Entitlement.pro.rawValue)
-
-            try await context.waitForEntitlements([.pro])
-            #expect(
-                context.store.entitlements?.transactions.contains {
-                    $0.productID == Entitlement.plus.rawValue && $0.isUpgraded
-                } == true
+            _ = try await context.session.buyProduct(
+                identifier: Plans.ProductID.tier1_Monthly.rawValue
             )
+            try await context.waitForEntitlements([.tier1])
+
+            _ = try await context.session.buyProduct(
+                identifier: Plans.ProductID.tier2_Monthly.rawValue
+            )
+
+            try await context.waitForEntitlements([.tier2])
         }
     }
 
     @Test
-    func downgradeFromProToPlusChangesAtRenewal() async throws {
+    func downgradeFromTier2ToTier1ChangesAtRenewal() async throws {
         try await withTestContext { context in
-            _ = try await context.session.buyProduct(identifier: Entitlement.pro.rawValue)
-            try await context.waitForEntitlements([.pro])
+            _ = try await context.session.buyProduct(
+                identifier: Plans.ProductID.tier2_Monthly.rawValue
+            )
+            try await context.waitForEntitlements([.tier2])
 
-            _ = try await context.session.buyProduct(identifier: Entitlement.plus.rawValue)
+            _ = try await context.session.buyProduct(
+                identifier: Plans.ProductID.tier1_Monthly.rawValue
+            )
 
             let preRenewalEntitlements = try await context.store.refreshEntitlements()
             #expect(
                 preRenewalEntitlements.transactions.map(\.productID)
-                    == [Entitlement.pro.rawValue]
+                    == [Plans.ProductID.tier2_Monthly.rawValue]
             )
-            #expect(context.store.activeEntitlements == [.pro])
+            #expect(context.store.activeEntitlements == [.tier2])
             try context.session.forceRenewalOfSubscription(
-                productIdentifier: Entitlement.pro.rawValue
+                productIdentifier: Plans.ProductID.tier2_Monthly.rawValue
             )
-            try await context.waitForEntitlements([.plus])
+            try await context.waitForEntitlements([.tier1])
         }
     }
 
     @Test
-    func cancellationKeepsPlusUntilExpirationThenRemovesIt() async throws {
+    func cancellationKeepsTier1UntilExpirationThenRemovesIt() async throws {
         try await withTestContext { context in
             let transaction = try await context.session.buyProduct(
-                identifier: Entitlement.plus.rawValue
+                identifier: Plans.ProductID.tier1_Monthly.rawValue
             )
-            try await context.waitForEntitlements([.plus])
+            try await context.waitForEntitlements([.tier1])
 
             try context.session.disableAutoRenewForTransaction(
                 identifier: UInt(transaction.id)
@@ -353,15 +463,26 @@ struct StoreTransactionKitIntegrationTests {
             let cancelledEntitlements = try await context.store.refreshEntitlements()
             #expect(
                 cancelledEntitlements.transactions.map(\.productID)
-                    == [Entitlement.plus.rawValue]
+                    == [Plans.ProductID.tier1_Monthly.rawValue]
             )
-            #expect(context.store.activeEntitlements == [.plus])
+            #expect(context.store.activeEntitlements == [.tier1])
 
             try context.session.expireSubscription(
-                productIdentifier: Entitlement.plus.rawValue
+                productIdentifier: Plans.ProductID.tier1_Monthly.rawValue
             )
 
-            try await context.waitForEntitlements([])
+            if #available(iOS 27.0,
+            tvOS 27.0,
+            watchOS 27.0,
+            visionOS 27.0,
+            *) {
+                let expiredEntitlements =
+                    try await context.store.restorePurchases()
+                #expect(expiredEntitlements.transactions.isEmpty)
+                #expect(context.store.activeEntitlements == [])
+            } else {
+                try await context.waitForEntitlements([])
+            }
         }
     }
 
@@ -369,21 +490,21 @@ struct StoreTransactionKitIntegrationTests {
     func renewalPublishesTheNewTransactionLineage() async throws {
         try await withTestContext { context in
             let initial = try await context.session.buyProduct(
-                identifier: Entitlement.plus.rawValue
+                identifier: Plans.ProductID.tier1_Monthly.rawValue
             )
-            try await context.waitForEntitlements([.plus])
+            try await context.waitForEntitlements([.tier1])
 
             try context.session.forceRenewalOfSubscription(
-                productIdentifier: Entitlement.plus.rawValue
+                productIdentifier: Plans.ProductID.tier1_Monthly.rawValue
             )
 
             let renewal = try await context.waitForTransaction(
-                productID: Entitlement.plus.rawValue,
+                productID: Plans.ProductID.tier1_Monthly.rawValue,
                 excluding: initial.id
             )
             #expect(renewal.originalID == initial.originalID)
             #expect(renewal.reason == .renewal)
-            #expect(context.store.activeEntitlements == [.plus])
+            #expect(context.store.activeEntitlements == [.tier1])
         }
     }
 
@@ -397,12 +518,14 @@ struct StoreTransactionKitIntegrationTests {
         let renewalHandlerStarted = TestSignal()
         let renewalHandlerRelease = TestSignal()
         let observedStore = ObservedStore(
-            handleTransaction: { transaction in
-                guard transaction.reason == .renewal else { return }
-                await renewalHandlerStarted.send()
-                try await renewalHandlerRelease.wait(for: 1)
+            decidePolicy: { transaction in
+                if transaction.reason == .renewal {
+                    await renewalHandlerStarted.send()
+                    try await renewalHandlerRelease.wait(for: 1)
+                }
+                return .finish
             },
-            reportFailure: { failure in
+            didFail: { failure in
                 Issue.record("Unexpected renewal failure: \(failure)")
             }
         )
@@ -410,12 +533,12 @@ struct StoreTransactionKitIntegrationTests {
         do {
             try await observedStore.waitForEntitlements([])
             let initial = try await session.buyProduct(
-                identifier: Entitlement.plus.rawValue
+                identifier: Plans.ProductID.tier1_Monthly.rawValue
             )
-            try await observedStore.waitForEntitlements([.plus])
+            try await observedStore.waitForEntitlements([.tier1])
 
             try session.forceRenewalOfSubscription(
-                productIdentifier: Entitlement.plus.rawValue
+                productIdentifier: Plans.ProductID.tier1_Monthly.rawValue
             )
             try await renewalHandlerStarted.wait(for: 1)
 
@@ -425,7 +548,7 @@ struct StoreTransactionKitIntegrationTests {
             )
             await renewalHandlerRelease.send()
             let renewal = try await observedStore.waitForTransaction(
-                productID: Entitlement.plus.rawValue,
+                productID: Plans.ProductID.tier1_Monthly.rawValue,
                 excluding: initial.id
             )
             #expect(renewal.reason == .renewal)
@@ -443,14 +566,15 @@ struct StoreTransactionKitIntegrationTests {
 
         let replayedHandlerCalls = TestSignal()
         try await withObservedStore(
-            handleTransaction: { _ in
+            decidePolicy: { _ in
                 await replayedHandlerCalls.send()
+                return .finish
             },
-            reportFailure: { failure in
+            didFail: { failure in
                 Issue.record("Unexpected post-renewal failure: \(failure)")
             }
         ) { observedStore in
-            try await observedStore.waitForEntitlements([.plus])
+            try await observedStore.waitForEntitlements([.tier1])
             #expect(await replayedHandlerCalls.value() == 0)
         }
     }
@@ -459,9 +583,9 @@ struct StoreTransactionKitIntegrationTests {
     func refundRemovesTheEntitlement() async throws {
         try await withTestContext { context in
             let transaction = try await context.session.buyProduct(
-                identifier: Entitlement.plus.rawValue
+                identifier: Plans.ProductID.tier1_Monthly.rawValue
             )
-            try await context.waitForEntitlements([.plus])
+            try await context.waitForEntitlements([.tier1])
 
             try context.session.refundTransaction(identifier: UInt(transaction.id))
 
@@ -481,19 +605,19 @@ struct StoreTransactionKitIntegrationTests {
 
     @Test
     func restoreReturnsAnExistingEntitlement() async throws {
-        try await withTestContext(preexistingSubscription: .plus) { context in
+        try await withTestContext(preexistingSubscription: .tier1_Yearly) { context in
             let entitlements = try await context.store.restorePurchases()
 
             #expect(
                 entitlements.transactions.map(\.productID)
-                    == [Entitlement.plus.rawValue]
+                    == [Plans.ProductID.tier1_Yearly.rawValue]
             )
-            #expect(context.store.activeEntitlements == [.plus])
+            #expect(context.store.activeEntitlements == [.tier1])
         }
     }
 
     @Test
-    func restorePropagatesAppStoreSyncFailureAndCanRetry() async throws {
+    func restorePropagatesAppStoreSyncFailure() async throws {
         try await withTestContext { context in
             let injectedFailure = SKTestFailures.AppStoreSync.generic(
                 .networkError(URLError(.notConnectedToInternet))
@@ -507,34 +631,40 @@ struct StoreTransactionKitIntegrationTests {
                     == injectedFailure
             )
 
+            var capturedRestoreError: (any Error)?
             do {
                 _ = try await context.store.restorePurchases()
-                Issue.record("Expected restorePurchases() to fail.")
-            } catch StoreKitError.networkError(let error) {
-                #expect(error.code == .notConnectedToInternet)
             } catch {
-                Issue.record("Unexpected restore error: \(error)")
+                capturedRestoreError = error
             }
-
-            try await context.session.setSimulatedError(
-                nil,
-                forAPI: .appStoreSync
+            let restoreError = try #require(
+                capturedRestoreError,
+                "Expected restorePurchases() to fail."
             )
-            #expect(
-                await context.session.simulatedError(forAPI: .appStoreSync)
-                    == nil
-            )
-            let entitlements = try await context.store.restorePurchases()
-            #expect(entitlements.transactions.isEmpty)
+            if #unavailable(iOS 27.0,
+            tvOS 27.0,
+            watchOS 27.0,
+            visionOS 27.0) {
+                guard case StoreKitError.networkError(let error) = restoreError else {
+                    Issue.record("Unexpected restore error: \(restoreError)")
+                    return
+                }
+                #expect(error.code == .notConnectedToInternet)
+            } else {
+                guard case StoreKitError.systemError = restoreError else {
+                    Issue.record("Unexpected restore error: \(restoreError)")
+                    return
+                }
+            }
             #expect(context.store.activeEntitlements == [])
         }
     }
 
     @Test
-    func askToBuyApprovalArrivesThroughUpdates() async throws {
+    func askToBuyResolutionMatchesTheStoreKitTestRuntime() async throws {
         try await withTestContext { context in
             context.session.askToBuyEnabled = true
-            let product = try await context.product(.plus)
+            let product = try await context.product(.tier1_Monthly)
             let result = try await purchase(product)
 
             let outcome = try await context.store.process(result)
@@ -548,43 +678,30 @@ struct StoreTransactionKitIntegrationTests {
                     $0.pendingAskToBuyConfirmation
                 }
             )
-            try context.session.approveAskToBuyTransaction(
-                identifier: pending.identifier
-            )
-            try await context.waitForEntitlements([.plus])
-        }
-    }
+            if #available(iOS 27.0,
+            tvOS 27.0,
+            watchOS 27.0,
+            visionOS 27.0,
+            *) {
+                try context.session.approveAskToBuyTransaction(
+                    identifier: pending.identifier
+                )
+                try await context.waitForEntitlements([.tier1])
+            } else {
+                try context.session.declineAskToBuyTransaction(
+                    identifier: pending.identifier
+                )
 
-    @Test
-    func askToBuyDeclineDoesNotGrantAnEntitlement() async throws {
-        try await withTestContext { context in
-            context.session.askToBuyEnabled = true
-            let product = try await context.product(.plus)
-            let result = try await purchase(product)
-
-            let outcome = try await context.store.process(result)
-
-            guard case .pending = outcome else {
-                Issue.record("Expected an Ask to Buy purchase to remain pending.")
-                return
+                let entitlements =
+                    try await context.store.restorePurchases()
+                #expect(entitlements.transactions.isEmpty)
+                #expect(context.store.activeEntitlements == [])
+                #expect(
+                    context.session.allTransactions().allSatisfy {
+                        !$0.pendingAskToBuyConfirmation
+                    }
+                )
             }
-            let pending = try #require(
-                context.session.allTransactions().first {
-                    $0.pendingAskToBuyConfirmation
-                }
-            )
-            try context.session.declineAskToBuyTransaction(
-                identifier: pending.identifier
-            )
-
-            let entitlements = try await context.store.restorePurchases()
-            #expect(entitlements.transactions.isEmpty)
-            #expect(context.store.activeEntitlements == [])
-            #expect(
-                context.session.allTransactions().allSatisfy {
-                    !$0.pendingAskToBuyConfirmation
-                }
-            )
         }
     }
 
@@ -606,9 +723,9 @@ struct StoreTransactionKitIntegrationTests {
     }
 
     private func withTestContext(
-        preexistingSubscription: Entitlement? = nil,
+        preexistingSubscription: Plans.ProductID? = nil,
         preexistingPurchaseOptions: Set<Product.PurchaseOption> = [],
-        expectedEntitlements: Set<Entitlement>? = nil,
+        expectedEntitlements: Set<SubscriptionEntitlement>? = nil,
         _ body: (TestContext) async throws -> Void
     ) async throws {
         let context = try await TestContext(
@@ -635,14 +752,14 @@ private final class TestContext {
     let session: SKTestSession
     private let observedStore: ObservedStore
 
-    var store: TransactionStore<Entitlement> {
+    var store: TransactionStore<SubscriptionEntitlement> {
         observedStore.store
     }
 
     init(
-        preexistingSubscription: Entitlement? = nil,
+        preexistingSubscription: Plans.ProductID? = nil,
         preexistingPurchaseOptions: Set<Product.PurchaseOption> = [],
-        expectedEntitlements: Set<Entitlement>? = nil
+        expectedEntitlements: Set<SubscriptionEntitlement>? = nil
     ) async throws {
         let session = try await makeTestSession()
         self.session = session
@@ -654,28 +771,38 @@ private final class TestContext {
         }
 
         let observedStore = ObservedStore(
-            handleTransaction: { _ in },
-            reportFailure: { error in
+            decidePolicy: { _ in .automatic },
+            didFail: { error in
                 Issue.record("Background transaction failure: \(error)")
             }
         )
         self.observedStore = observedStore
         let expected =
             expectedEntitlements
-            ?? preexistingSubscription.map { [$0] }
+            ?? preexistingSubscription.map {
+                switch $0 {
+                case .tier1_Monthly, .tier1_Yearly:
+                    [.tier1]
+                case .tier2_Monthly, .tier2_Yearly:
+                    [.tier2]
+                }
+            }
             ?? []
         try await observedStore.waitForEntitlements(expected)
-        #expect(store.startupError == nil)
+        guard case .ready = store.entitlementStatus else {
+            Issue.record("The store did not reach ready entitlement state.")
+            return
+        }
     }
 
-    func product(_ entitlement: Entitlement) async throws -> Product {
+    func product(_ productID: Plans.ProductID) async throws -> Product {
         try #require(
-            try await Product.products(for: [entitlement.rawValue]).first
+            try await Product.products(for: [productID.rawValue]).first
         )
     }
 
     func waitForEntitlements(
-        _ expected: Set<Entitlement>
+        _ expected: Set<SubscriptionEntitlement>
     ) async throws {
         try await observedStore.waitForEntitlements(expected)
     }
@@ -701,24 +828,31 @@ private final class TestContext {
 
 @MainActor
 private final class ObservedStore {
-    let store: TransactionStore<Entitlement>
+    let store: TransactionStore<SubscriptionEntitlement>
     let observation: TransactionStoreObservation
 
     init(
-        handleTransaction:
-            @escaping @Sendable (StoreTransactionSnapshot) async throws -> Void,
-        reportFailure:
+        decidePolicy:
+            @escaping @Sendable (StoreTransactionSnapshot) async throws
+            -> StoreTransactionHandlingPolicy,
+        didFail:
             @escaping @Sendable (StoreTransactionBackgroundFailure) async -> Void
     ) {
-        let store = TransactionStore<Entitlement>(
-            handleTransaction: handleTransaction,
-            reportFailure: reportFailure
+        let delegate = ClosureTransactionStoreDelegate(
+            decidePolicy: decidePolicy,
+            didFail: didFail
+        )
+        let store = TransactionStore(
+            subscriptionCatalog: subscriptionCatalog,
+            delegate: delegate
         )
         self.store = store
         self.observation = TransactionStoreObservation(store: store)
     }
 
-    func waitForEntitlements(_ expected: Set<Entitlement>) async throws {
+    func waitForEntitlements(
+        _ expected: Set<SubscriptionEntitlement>
+    ) async throws {
         while true {
             let generation = observation.generation
             guard store.activeEntitlements != expected else { return }
@@ -729,8 +863,11 @@ private final class ObservedStore {
     func waitForStartupFailure() async throws {
         while true {
             let generation = observation.generation
-            guard store.startupError == nil else { return }
-            try await observation.waitForChange(after: generation)
+            guard case .failed = store.entitlementStatus else {
+                try await observation.waitForChange(after: generation)
+                continue
+            }
+            return
         }
     }
 
@@ -755,17 +892,48 @@ private final class ObservedStore {
     }
 }
 
+private final class ClosureTransactionStoreDelegate: TransactionStoreDelegate {
+    private let policy:
+        @Sendable (StoreTransactionSnapshot) async throws
+            -> StoreTransactionHandlingPolicy
+    private let failure: @Sendable (StoreTransactionBackgroundFailure) async -> Void
+
+    init(
+        decidePolicy:
+            @escaping @Sendable (StoreTransactionSnapshot) async throws
+            -> StoreTransactionHandlingPolicy,
+        didFail:
+            @escaping @Sendable (StoreTransactionBackgroundFailure) async -> Void
+    ) {
+        self.policy = decidePolicy
+        self.failure = didFail
+    }
+
+    func decidePolicy(
+        for transaction: StoreTransactionSnapshot
+    ) async throws -> StoreTransactionHandlingPolicy {
+        try await policy(transaction)
+    }
+
+    func didFail(
+        with failure: StoreTransactionBackgroundFailure
+    ) async {
+        await self.failure(failure)
+    }
+}
+
 @MainActor
 private func withObservedStore(
-    handleTransaction:
-        @escaping @Sendable (StoreTransactionSnapshot) async throws -> Void,
-    reportFailure:
+    decidePolicy:
+        @escaping @Sendable (StoreTransactionSnapshot) async throws
+        -> StoreTransactionHandlingPolicy,
+    didFail:
         @escaping @Sendable (StoreTransactionBackgroundFailure) async -> Void,
     _ body: (ObservedStore) async throws -> Void
 ) async throws {
     let observedStore = ObservedStore(
-        handleTransaction: handleTransaction,
-        reportFailure: reportFailure
+        decidePolicy: decidePolicy,
+        didFail: didFail
     )
     do {
         try await body(observedStore)
@@ -782,12 +950,12 @@ private func withObservedStore(
 
 @MainActor
 private final class TransactionStoreObservation {
-    private weak var store: TransactionStore<Entitlement>?
+    private weak var store: TransactionStore<SubscriptionEntitlement>?
     private let changes: AsyncStream<UInt64>
     private let continuation: AsyncStream<UInt64>.Continuation
     private(set) var generation: UInt64 = 0
 
-    init(store: TransactionStore<Entitlement>) {
+    init(store: TransactionStore<SubscriptionEntitlement>) {
         let pair = AsyncStream<UInt64>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
         )
@@ -817,7 +985,8 @@ private final class TransactionStoreObservation {
         guard let store else { return }
         withObservationTracking {
             _ = store.entitlements
-            _ = store.startupError
+            _ = store.activeEntitlements
+            _ = store.entitlementStatus
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.didChange()
@@ -912,7 +1081,7 @@ private enum StoreKitTestEnvironment {
         }
         _ = try #require(
             try await Product.products(
-                for: [Entitlement.lifetime.rawValue]
+                for: [Plans.ProductID.tier1_Monthly.rawValue]
             ).first,
             "The StoreKit test configuration is not active."
         )

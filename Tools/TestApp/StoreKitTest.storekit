@@ -14,21 +14,7 @@
 
   ],
   "products" : [
-    {
-      "displayPrice" : "9.99",
-      "familyShareable" : false,
-      "internalID" : "StoreTransactionKitLifetime",
-      "localizations" : [
-        {
-          "description" : "The lifetime entitlement used by integration tests.",
-          "displayName" : "Lifetime",
-          "locale" : "en_US"
-        }
-      ],
-      "productID" : "com.example.StoreTransactionKit.lifetime",
-      "referenceName" : "Lifetime",
-      "type" : "NonConsumable"
-    }
+
   ],
   "settings" : {
     "_askToBuyEnabled" : false,
@@ -97,18 +83,46 @@
           "displayPrice" : "1.99",
           "familyShareable" : false,
           "groupNumber" : 2,
-          "internalID" : "StoreTransactionKitPlus",
+          "internalID" : "StoreTransactionKitTier1Monthly",
           "introductoryOffer" : null,
           "localizations" : [
             {
-              "description" : "The Plus plan used by integration tests.",
-              "displayName" : "Plus",
+              "description" : "The monthly Tier 1 plan used by integration tests.",
+              "displayName" : "Tier 1 Monthly",
               "locale" : "en_US"
             }
           ],
-          "productID" : "com.example.StoreTransactionKit.plus",
+          "productID" : "com.example.StoreTransactionKit.tier1.monthly",
           "recurringSubscriptionPeriod" : "P1M",
-          "referenceName" : "Plus",
+          "referenceName" : "Tier 1 Monthly",
+          "subscriptionGroupID" : "StoreTransactionKitSubscriptionGroup",
+          "type" : "RecurringSubscription",
+          "winbackOffers" : [
+
+          ]
+        },
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "19.99",
+          "familyShareable" : false,
+          "groupNumber" : 2,
+          "internalID" : "StoreTransactionKitTier1Yearly",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "The yearly Tier 1 plan used by integration tests.",
+              "displayName" : "Tier 1 Yearly",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "com.example.StoreTransactionKit.tier1.yearly",
+          "recurringSubscriptionPeriod" : "P1Y",
+          "referenceName" : "Tier 1 Yearly",
           "subscriptionGroupID" : "StoreTransactionKitSubscriptionGroup",
           "type" : "RecurringSubscription",
           "winbackOffers" : [
@@ -125,19 +139,84 @@
           "displayPrice" : "3.99",
           "familyShareable" : false,
           "groupNumber" : 1,
-          "internalID" : "StoreTransactionKitPro",
+          "internalID" : "StoreTransactionKitTier2Monthly",
           "introductoryOffer" : null,
           "localizations" : [
             {
-              "description" : "The Pro plan used by integration tests.",
-              "displayName" : "Pro",
+              "description" : "The monthly Tier 2 plan used by integration tests.",
+              "displayName" : "Tier 2 Monthly",
               "locale" : "en_US"
             }
           ],
-          "productID" : "com.example.StoreTransactionKit.pro",
+          "productID" : "com.example.StoreTransactionKit.tier2.monthly",
           "recurringSubscriptionPeriod" : "P1M",
-          "referenceName" : "Pro",
+          "referenceName" : "Tier 2 Monthly",
           "subscriptionGroupID" : "StoreTransactionKitSubscriptionGroup",
+          "type" : "RecurringSubscription",
+          "winbackOffers" : [
+
+          ]
+        },
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "39.99",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "StoreTransactionKitTier2Yearly",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "The yearly Tier 2 plan used by integration tests.",
+              "displayName" : "Tier 2 Yearly",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "com.example.StoreTransactionKit.tier2.yearly",
+          "recurringSubscriptionPeriod" : "P1Y",
+          "referenceName" : "Tier 2 Yearly",
+          "subscriptionGroupID" : "StoreTransactionKitSubscriptionGroup",
+          "type" : "RecurringSubscription",
+          "winbackOffers" : [
+
+          ]
+        }
+      ]
+    },
+    {
+      "id" : "StoreTransactionKitExternalSubscriptionGroup",
+      "localizations" : [
+
+      ],
+      "name" : "External",
+      "subscriptions" : [
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "0.99",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "StoreTransactionKitExternalMonthly",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "A catalog-external subscription used by integration tests.",
+              "displayName" : "External Monthly",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "com.example.StoreTransactionKit.external.monthly",
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "External Monthly",
+          "subscriptionGroupID" : "StoreTransactionKitExternalSubscriptionGroup",
           "type" : "RecurringSubscription",
           "winbackOffers" : [
 
