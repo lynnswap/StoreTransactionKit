@@ -38,7 +38,7 @@ struct DirectOperationReportingTests {
 
         #expect(
             claimed?.source
-                == .abandonedDirectOperation(.currentEntitlements)
+                == .abandonedDirectOperation(.refreshEntitlements)
         )
         #expect(claimed?.transactionID == 2)
         #expect(claimed?.underlyingError is TestFailure)
@@ -64,7 +64,7 @@ struct DirectOperationReportingTests {
 
     private func makeReport(id: UInt64) -> StoreTransactionBackgroundFailure {
         StoreTransactionBackgroundFailure(
-            source: .abandonedDirectOperation(.currentEntitlements),
+            source: .abandonedDirectOperation(.refreshEntitlements),
             transactionID: id,
             productID: "product-\(id)",
             underlyingError: TestFailure()

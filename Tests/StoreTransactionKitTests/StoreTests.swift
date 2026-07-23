@@ -298,7 +298,7 @@ struct StoreTests {
                     _ = try await holder.get().refreshEntitlements()
                     Issue.record("TransactionStore unexpectedly allowed handler reentry.")
                 } catch StoreTransactionError.reentrantOperation(
-                    operation: .currentEntitlements
+                    operation: .refreshEntitlements
                 ) {
                     await rejected.send()
                 } catch {

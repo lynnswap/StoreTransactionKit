@@ -179,7 +179,7 @@ package actor StoreTransactionSession {
     /// - Throws: A StoreKit verification or query error, a lifecycle or callback
     ///   reentrancy error, or `CancellationError` for an abandoned waiter.
     package func currentEntitlements() async throws -> StoreEntitlements {
-        let runtime = try runningRuntime(operation: .currentEntitlements)
+        let runtime = try runningRuntime(operation: .refreshEntitlements)
         guard let leases = runtime.beginOperation() else {
             throw StoreTransactionError.closing
         }

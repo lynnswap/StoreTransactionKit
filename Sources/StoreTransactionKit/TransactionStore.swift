@@ -162,7 +162,7 @@ where
     /// - Returns: The complete verified entitlement projection.
     @discardableResult
     public func refreshEntitlements() async throws -> StoreEntitlements {
-        try await waitForStartupAttempt(operation: .currentEntitlements)
+        try await waitForStartupAttempt(operation: .refreshEntitlements)
         return try await transactionSession.currentEntitlements()
     }
 

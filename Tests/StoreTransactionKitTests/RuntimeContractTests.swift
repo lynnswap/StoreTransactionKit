@@ -298,7 +298,7 @@ struct RuntimeContractTests {
             handleTransaction: { _ in },
             reportFailure: { failure in
                 switch failure.source {
-                case .abandonedDirectOperation(.currentEntitlements):
+                case .abandonedDirectOperation(.refreshEntitlements):
                     await reports.append("abandoned-refresh")
                 default:
                     await reports.append("unexpected")

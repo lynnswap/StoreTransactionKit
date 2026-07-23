@@ -710,7 +710,7 @@ struct StoreTransactionSessionTests {
                     _ = try await holder.get().currentEntitlements()
                     await observations.append("entitlements-unexpected-success")
                 } catch StoreTransactionError.reentrantOperation(
-                    operation: .currentEntitlements
+                    operation: .refreshEntitlements
                 ) {
                     await observations.append("entitlements-rejected")
                 } catch {

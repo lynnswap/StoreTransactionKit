@@ -288,7 +288,7 @@ package final class StoreTransactionRuntime: Sendable {
                         binding: binding,
                         propagating: error,
                         reportsWhenAbandoned: refresh.role == .owner,
-                        operation: .currentEntitlements,
+                        operation: .refreshEntitlements,
                         snapshot: nil
                     )
                 )
