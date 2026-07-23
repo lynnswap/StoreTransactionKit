@@ -48,8 +48,25 @@ synthetic acknowledgement, reconciliation, and observable-state publication.
 No fixed delay or global “idle” wait is needed.
 
 A later purchase in the same group replaces the active synthetic product. The
-harness models immediate current access; it does not simulate renewal timing,
-billing retry, upgrade scheduling, expiration, or revocation.
+harness models immediate current access, not StoreKit's billing and
+subscription-timing machinery.
+
+## Remove active subscription access
+
+`expireActiveSubscription()` removes the harness's active subscription and
+returns its snapshot after the store publishes ready-empty raw and typed state:
+
+```swift
+let expired = try await harness.expireActiveSubscription()
+
+#expect(expired.productID == Plans.ProductID.tier1_Monthly.rawValue)
+#expect(harness.store.entitlements?.transactions == [])
+#expect(harness.store.activeEntitlements == [])
+```
+
+This command models the deterministic loss of current access needed by app and
+ViewModel tests. It doesn't simulate StoreKit renewal, billing, time passage,
+revocation, or expiration metadata.
 
 ## Exercise an unrecognized subscription
 
@@ -92,6 +109,25 @@ try await withTransactionStoreTestHarness(
 `deliver(_:)` accepts only an exact synthetic snapshot registered by that
 harness. Replaying an older revision does not replace a later synthetic
 subscription that is already current.
+
+## Deliver an arbitrary transaction
+
+Use `makeTransaction(productID:productType:subscriptionGroupID:isUpgraded:)`
+to exercise the production classification and general delegate path with a
+delivery-only snapshot:
+
+```swift
+let transaction = harness.makeTransaction(
+    productID: "com.example.tokens",
+    productType: .consumable
+)
+
+let outcome = try await harness.deliver(transaction)
+```
+
+An arbitrary transaction never changes the synthetic current-entitlement
+source. Its transaction policy, exact-revision replay, and completion still use
+the production pipeline.
 
 The returned ``StoreTransactionSnapshot`` is synthetic. Its
 ``StoreTransactionSnapshot/jwsRepresentation`` is a deterministic sentinel, not

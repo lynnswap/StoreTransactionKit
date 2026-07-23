@@ -96,7 +96,7 @@ package struct StoreTransactionFailurePropagation: Sendable {
 }
 
 /// An error produced while operating a transaction store.
-public enum StoreTransactionError: Error, Sendable {
+public enum StoreTransactionError: LocalizedError, Sendable {
     /// An irreversible StoreKit action that completed before a later operation failed.
     public enum CompletedOperation: Sendable, Hashable {
         /// The framework finished the exact transaction revision.
@@ -144,6 +144,76 @@ public enum StoreTransactionError: Error, Sendable {
         after: CompletedOperation,
         underlyingError: any Error
     )
+
+    /// A localized description of the transaction-store failure.
+    public var errorDescription: String? {
+        switch self {
+        case .closing:
+            "The transaction store is closing and cannot accept new operations."
+
+        case .closed:
+            "The transaction store is closed."
+
+        case .unknownPurchaseResult:
+            "StoreKit returned an unknown purchase result."
+
+        case .unhandledTransaction(let productID, let productType):
+            "Transaction handling is required for product \(productID) of type "
+                + "\(productType.rawValue)."
+
+        case .reentrantOperation(let operation):
+            "The transaction store cannot perform \(operation.errorDescription) "
+                + "from a callback owned by the same store."
+
+        case .operationUnavailableInOverride(let operation):
+            "The transaction store cannot perform \(operation.errorDescription) "
+                + "when entitlements are overridden."
+
+        case .entitlementRefreshFailed(let operation, let underlyingError):
+            "Entitlement refresh failed after \(operation.errorDescription): "
+                + underlyingError.localizedDescription
+        }
+    }
+
+    /// A localized suggestion for recovering from the failure, when available.
+    public var recoverySuggestion: String? {
+        switch self {
+        case .entitlementRefreshFailed:
+            "Call refreshEntitlements() instead of repeating the completed StoreKit action."
+
+        case .closing, .closed, .unknownPurchaseResult, .unhandledTransaction,
+            .reentrantOperation, .operationUnavailableInOverride:
+            nil
+        }
+    }
+}
+
+private extension StoreTransactionOperation {
+    var errorDescription: String {
+        switch self {
+        case .processPurchase:
+            "purchase processing"
+        case .refreshEntitlements:
+            "entitlement refresh"
+        case .history:
+            "a transaction history query"
+        case .restorePurchases:
+            "purchase restoration"
+        case .close:
+            "store closure"
+        }
+    }
+}
+
+private extension StoreTransactionError.CompletedOperation {
+    var errorDescription: String {
+        switch self {
+        case .finishedTransaction(let transaction):
+            "finishing transaction \(transaction.id) for product \(transaction.productID)"
+        case .synchronizedPurchases:
+            "synchronizing purchases"
+        }
+    }
 }
 
 package enum StoreTransactionLifecycleError: Error, Sendable {

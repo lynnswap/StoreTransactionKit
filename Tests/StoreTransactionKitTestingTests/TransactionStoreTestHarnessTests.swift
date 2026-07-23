@@ -78,6 +78,243 @@ struct TransactionStoreTestHarnessTests {
     }
 
     @MainActor
+    @Test("expiration returns after publishing ready empty state")
+    func expirationCompletion() async throws {
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog
+        ) { harness in
+            let purchased = try await harness.purchase(
+                .tier1_Monthly,
+                in: HarnessPlans.self
+            )
+
+            let expired = try await harness.expireActiveSubscription()
+
+            #expect(expired == purchased)
+            guard case .ready = harness.store.entitlementStatus else {
+                Issue.record("Expiration did not publish ready state.")
+                return
+            }
+            #expect(harness.store.entitlements?.transactions == [])
+            #expect(harness.store.activeEntitlements == [])
+            #expect(!harness.store.isEntitled(to: .tier1))
+        }
+    }
+
+    @MainActor
+    @Test("expiration requires an active subscription")
+    func expirationRequiresActiveSubscription() async throws {
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog
+        ) { harness in
+            await expectHarnessError(.noActiveSubscription) {
+                _ = try await harness.expireActiveSubscription()
+            }
+
+            guard case .ready = harness.store.entitlementStatus else {
+                Issue.record("The synthetic store lost ready state.")
+                return
+            }
+            #expect(harness.store.entitlements?.transactions == [])
+            #expect(harness.store.activeEntitlements == [])
+        }
+    }
+
+    @MainActor
+    @Test("closed admission takes precedence over missing active access")
+    func closedExpirationAdmission() async throws {
+        var retained: TransactionStoreTestHarness<HarnessEntitlement>?
+
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog
+        ) { harness in
+            retained = harness
+        }
+
+        do {
+            _ = try await #require(retained).expireActiveSubscription()
+            Issue.record("Expected closed synthetic expiration admission.")
+        } catch StoreTransactionError.closed {
+            return
+        } catch {
+            Issue.record("Unexpected expiration error: \(error)")
+        }
+    }
+
+    @MainActor
+    @Test("reentrant admission takes precedence over missing active access")
+    func reentrantExpirationAdmission() async throws {
+        let delegate = ReentrantExpirationDelegate()
+
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog,
+            delegate: delegate
+        ) { harness in
+            await delegate.setExpiration {
+                _ = try await harness.expireActiveSubscription()
+            }
+
+            do {
+                _ = try await harness.purchase(
+                    .tier1_Monthly,
+                    in: HarnessPlans.self
+                )
+                Issue.record("Expected reentrant expiration admission.")
+            } catch StoreTransactionError.reentrantOperation(
+                operation: .refreshEntitlements
+            ) {
+                #expect(harness.store.entitlements?.transactions == [])
+                #expect(harness.store.activeEntitlements == [])
+            } catch {
+                Issue.record("Unexpected purchase error: \(error)")
+            }
+        }
+    }
+
+    @MainActor
+    @Test("pre-admission expiration cancellation preserves active access")
+    func preAdmissionExpirationCancellation() async throws {
+        let clock = TransactionStoreTestClock()
+
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog
+        ) { harness in
+            let purchased = try await harness.purchase(
+                .tier1_Monthly,
+                in: HarnessPlans.self
+            )
+            let expiration = Task { @MainActor in
+                do {
+                    try await clock.sleep(for: .seconds(1))
+                } catch is CancellationError {
+                    // Preserve cancellation before entering expiration admission.
+                }
+                return try await harness.expireActiveSubscription()
+            }
+            try await clock.waitUntilPendingSleepCount(reaches: 1)
+
+            expiration.cancel()
+            await #expect(throws: CancellationError.self) {
+                _ = try await expiration.value
+            }
+
+            #expect(harness.store.entitlements?.transactions == [purchased])
+            #expect(harness.store.activeEntitlements == [.tier1])
+        }
+    }
+
+    @MainActor
+    @Test("an expired revision replay cannot resurrect access")
+    func expiredRevisionReplay() async throws {
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog
+        ) { harness in
+            let expired = try await harness.purchase(
+                .tier1_Monthly,
+                in: HarnessPlans.self
+            )
+            #expect(
+                try await harness.expireActiveSubscription()
+                    == expired
+            )
+
+            #expect(
+                try await harness.deliver(expired)
+                    == .completed(expired)
+            )
+            #expect(harness.store.entitlements?.transactions == [])
+            #expect(harness.store.activeEntitlements == [])
+
+            let refreshed = try await harness.store.refreshEntitlements()
+            #expect(refreshed.transactions == [])
+            #expect(harness.store.entitlements?.transactions == [])
+            #expect(harness.store.activeEntitlements == [])
+
+            let newer = try await harness.purchase(
+                .tier2_Monthly,
+                in: HarnessPlans.self
+            )
+            #expect(newer.id > expired.id)
+            #expect(harness.store.entitlements?.transactions == [newer])
+            #expect(harness.store.activeEntitlements == [.tier2])
+        }
+    }
+
+    @MainActor
+    @Test("an arbitrary unmanaged transaction uses the production pipeline")
+    func arbitraryUnmanagedTransaction() async throws {
+        let delegate = ActorRecordingDelegate()
+
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog,
+            delegate: delegate
+        ) { harness in
+            let transaction = harness.makeTransaction(
+                productID: "testing.consumable.tokens",
+                productType: .consumable,
+                subscriptionGroupID: DifferentIDPlans.id,
+                isUpgraded: true
+            )
+            let outcome = try await harness.deliver(transaction)
+
+            #expect(
+                transaction.subscriptionGroupID
+                    == DifferentIDPlans.id.rawValue
+            )
+            #expect(transaction.productType == .consumable)
+            #expect(transaction.isUpgraded)
+            #expect(outcome == .completed(transaction))
+            #expect(
+                await delegate.snapshot()
+                    == .init(decisions: 1, failures: 0)
+            )
+            #expect(harness.store.entitlements?.transactions == [])
+            #expect(harness.store.activeEntitlements == [])
+        }
+    }
+
+    @MainActor
+    @Test("same-group non-subscription metadata fails catalog validation")
+    func arbitraryTransactionCatalogContradiction() async throws {
+        let delegate = ActorRecordingDelegate()
+
+        try await withTransactionStoreTestHarness(
+            subscriptionCatalog: harnessSubscriptionCatalog,
+            delegate: delegate
+        ) { harness in
+            let transaction = harness.makeTransaction(
+                productID: "testing.subscription.invalid-type",
+                productType: .nonConsumable,
+                subscriptionGroupID: HarnessPlans.id
+            )
+
+            do {
+                _ = try await harness.deliver(transaction)
+                Issue.record("Expected catalog product-type validation to fail.")
+            } catch let error as AutoRenewableSubscriptionCatalogError {
+                switch error {
+                case .productTypeMismatch(let productID, let actual):
+                    #expect(productID == transaction.productID)
+                    #expect(actual == .nonConsumable)
+                case .subscriptionGroupMismatch:
+                    Issue.record("Received the wrong catalog validation error.")
+                }
+            }
+
+            #expect(
+                await delegate.snapshot()
+                    == .init(decisions: 0, failures: 0)
+            )
+            guard case .failed = harness.store.entitlementStatus else {
+                Issue.record("Catalog contradiction did not fail entitlement state.")
+                return
+            }
+            #expect(harness.store.entitlements == nil)
+            #expect(harness.store.activeEntitlements == nil)
+        }
+    }
+
+    @MainActor
     @Test("default unrecognized policy publishes raw ready state without entitlement")
     func defaultUnrecognizedPolicy() async throws {
         let generalDelegate = ActorRecordingDelegate()
@@ -779,6 +1016,26 @@ private actor ThrowingDelegate: TransactionStoreDelegate {
 
     func snapshot() -> DelegateSnapshot {
         DelegateSnapshot(decisions: decisions, failures: failures)
+    }
+}
+
+private actor ReentrantExpirationDelegate: TransactionStoreDelegate {
+    private var expiration: (@MainActor @Sendable () async throws -> Void)?
+
+    func setExpiration(
+        _ expiration: @escaping @MainActor @Sendable () async throws -> Void
+    ) {
+        self.expiration = expiration
+    }
+
+    func decidePolicy(
+        for transaction: StoreTransactionSnapshot
+    ) async throws -> StoreTransactionHandlingPolicy {
+        guard let expiration else {
+            preconditionFailure("The reentrant expiration was not configured.")
+        }
+        try await expiration()
+        return .finish
     }
 }
 

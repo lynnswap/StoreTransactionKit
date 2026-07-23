@@ -6,8 +6,10 @@ describe access in your app.
 ## Declare the catalog
 
 An App Store Connect subscription group can contain several service levels and
-several durations at each level. StoreKit owns group-level ordering, duration,
-renewal, and billing state. Your app owns the access meaning.
+several durations at each level. App Store Connect numbers service levels from
+highest to lowest, so level 1 is the highest. StoreKit owns that upgrade and
+downgrade ordering, duration, renewal, and billing state. Your app owns the
+access meaning.
 
 ```swift
 import StoreTransactionKit
@@ -52,6 +54,10 @@ The compiler keeps group-specific Product IDs and app entitlements typed. At
 runtime, the catalog also validates each matching transaction's auto-renewable
 product type and subscription group before publishing access.
 
+In this example, `.tier1` and `.tier2` are exact active plan identities. The
+catalog doesn't interpret StoreKit's service-level order as app feature
+inclusion.
+
 ## Merchandise declared products
 
 Pass the same declared Product IDs to StoreKit's subscription view:
@@ -74,14 +80,24 @@ See <doc:UnderstandingTransactionHandling> to choose another policy with
 ## Read access without blocking the UI
 
 ``TransactionStore/isEntitled(to:)`` performs exact set membership and returns
-`false` while access is unavailable. Keep ordinary app content usable and gate
-only the paid feature:
+`false` while access is unavailable. Derive feature access from the active plan
+while keeping ordinary app content usable:
 
 ```swift
+private var canUsePremiumFeatures: Bool {
+    store.isEntitled(to: .tier1)
+        || store.isEntitled(to: .tier2)
+}
+
 private var canExportPDF: Bool {
     store.isEntitled(to: .tier1)
 }
 ```
+
+Here, tier 1 grants the features shared by both plans and the tier-1-only PDF
+export, while tier 2 grants only the shared features. If several screens use the
+same inclusion rule, centralize it in the app's ViewModel or feature policy
+instead of repeating the membership checks.
 
 Use ``TransactionStore/entitlementStatus`` only when the interface needs to
 explain why access is unavailable. In `.ready`, an empty

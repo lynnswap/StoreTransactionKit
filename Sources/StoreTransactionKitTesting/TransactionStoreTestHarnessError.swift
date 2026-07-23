@@ -33,6 +33,9 @@ public enum TransactionStoreTestHarnessError:
     /// The supplied value doesn't exactly match a snapshot registered by this harness.
     case unregisteredTransaction(transactionID: UInt64)
 
+    /// The synthetic current-entitlement source has no active subscription.
+    case noActiveSubscription
+
     /// The synthetic store doesn't provide the requested live StoreKit operation.
     case operationUnavailable(operation: StoreTransactionOperation)
 
@@ -53,6 +56,9 @@ public enum TransactionStoreTestHarnessError:
 
         case .unregisteredTransaction(let transactionID):
             "Transaction \(transactionID) does not exactly match a snapshot registered by this test harness."
+
+        case .noActiveSubscription:
+            "The transaction-store test harness has no active subscription to expire."
 
         case .operationUnavailable(let operation):
             "The synthetic transaction store does not provide \(operation.description)."

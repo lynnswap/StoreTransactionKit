@@ -34,6 +34,11 @@ public let legacySubscriptionProductID =
 public final class NotesViewModel {
     private let store: TransactionStore<SubscriptionEntitlement>
 
+    public var hasPremiumAccess: Bool {
+        store.isEntitled(to: .tier1)
+            || store.isEntitled(to: .tier2)
+    }
+
     public var canExportPDF: Bool {
         store.isEntitled(to: .tier1)
     }
@@ -89,7 +94,7 @@ struct Consumer {
                 unrecognizedSubscriptionDelegate
         )
         let viewModel = NotesViewModel(store: store)
-        print("Can export PDF: \(viewModel.canExportPDF)")
+        print("Has premium access: \(viewModel.hasPremiumAccess)")
         try await store.close()
     }
 }

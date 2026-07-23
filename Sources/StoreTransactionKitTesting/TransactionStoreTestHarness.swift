@@ -1,4 +1,5 @@
 import StoreTransactionKit
+import StoreKit
 
 /// A StoreKit-free driver for a production ``TransactionStore`` data flow.
 @MainActor
@@ -44,11 +45,13 @@ where Entitlement: Hashable & Sendable {
         try Task.checkCancellation()
         let snapshot = ledger.makeRegisteredSnapshot(
             productID: rawProductID,
-            subscriptionGroupID: Group.id
+            productType: .autoRenewable,
+            subscriptionGroupID: Group.id,
+            currentEntitlementEffect: .replaceActiveSubscription
         )
         let outcome = try await store.processSyntheticDelivery(
             .synthetic(snapshot: snapshot) { [ledger] in
-                await ledger.activate(snapshot)
+                await ledger.applyDeliveryEffect(for: snapshot)
             }
         )
         guard case .completed(let completed) = outcome else {
@@ -84,7 +87,34 @@ where Entitlement: Hashable & Sendable {
 
         return ledger.makeRegisteredSnapshot(
             productID: productID,
-            subscriptionGroupID: Group.id
+            productType: .autoRenewable,
+            subscriptionGroupID: Group.id,
+            currentEntitlementEffect: .replaceActiveSubscription
+        )
+    }
+
+    /// Creates and registers a delivery-only synthetic transaction.
+    ///
+    /// The transaction enters the production classification and policy pipeline
+    /// when passed to ``deliver(_:)`` but never changes the synthetic current
+    /// entitlement source. Other snapshot fields use deterministic harness
+    /// defaults.
+    public func makeTransaction(
+        productID: String,
+        productType: Product.ProductType,
+        subscriptionGroupID: SubscriptionGroupID? = nil,
+        isUpgraded: Bool = false
+    ) -> StoreTransactionSnapshot {
+        precondition(
+            !productID.isEmpty,
+            "A synthetic transaction product identifier must not be empty."
+        )
+        return ledger.makeRegisteredSnapshot(
+            productID: productID,
+            productType: productType,
+            subscriptionGroupID: subscriptionGroupID,
+            isUpgraded: isUpgraded,
+            currentEntitlementEffect: .none
         )
     }
 
@@ -114,9 +144,27 @@ where Entitlement: Hashable & Sendable {
                 acknowledge: {}
             ),
             didAdmit: { [ledger] in
-                await ledger.activate(transaction)
+                await ledger.applyDeliveryEffect(for: transaction)
             }
         )
+    }
+
+    /// Removes the active synthetic subscription and publishes ready-empty state.
+    ///
+    /// The command returns the removed snapshot after production entitlement
+    /// reconciliation and observable-state publication complete. It does not
+    /// simulate renewal, billing, time passage, revocation, or StoreKit
+    /// expiration metadata.
+    @discardableResult
+    public func expireActiveSubscription() async throws
+        -> StoreTransactionSnapshot
+    {
+        try await store.refreshSyntheticEntitlements { [ledger] in
+            guard let expired = ledger.expireActiveSubscription() else {
+                throw TransactionStoreTestHarnessError.noActiveSubscription
+            }
+            return expired
+        }
     }
 
     private func validate<Group>(
