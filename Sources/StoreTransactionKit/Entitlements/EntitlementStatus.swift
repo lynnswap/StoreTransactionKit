@@ -1,6 +1,6 @@
 /// The availability of the store's typed entitlement projection.
 public enum EntitlementStatus: Sendable {
-    /// No entitlement readiness attempt has completed.
+    /// The initial entitlement reconciliation has not completed.
     case loading
 
     /// No usable complete entitlement snapshot is available.
@@ -9,6 +9,9 @@ public enum EntitlementStatus: Sendable {
     case failed(any Error)
 
     /// A complete live entitlement snapshot is available.
+    ///
+    /// Both raw and typed entitlement collections are authoritative in this
+    /// state, including when they are empty.
     case ready
 
     /// App-supplied entitlements are authoritative instead of StoreKit state.

@@ -1,7 +1,7 @@
 import Foundation
 import StoreKit
 
-/// An inconsistency between a verified StoreKit transaction and a subscription catalog.
+/// An inconsistency between a transaction snapshot and a subscription catalog.
 public enum AutoRenewableSubscriptionCatalogError: LocalizedError, Sendable {
     /// A current product in the managed group has no catalog declaration.
     case undeclaredProduct(

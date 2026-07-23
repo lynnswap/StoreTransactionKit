@@ -1,4 +1,6 @@
 /// A product declaration and the app entitlement it grants.
+///
+/// Monthly and yearly products may intentionally grant the same entitlement.
 public struct StoreSubscription<ProductID, Entitlement>: Sendable
 where
     ProductID: RawRepresentable<String> & Hashable & Sendable,

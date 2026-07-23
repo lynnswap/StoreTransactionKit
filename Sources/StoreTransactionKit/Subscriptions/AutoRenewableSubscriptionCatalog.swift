@@ -1,6 +1,10 @@
 import StoreKit
 
-/// A validated mapping from StoreKit products to app-defined entitlements.
+/// A validated mapping from one auto-renewable subscription group to app entitlements.
+///
+/// The catalog treats ``AutoRenewableSubscriptionGroup/subscriptions`` as the
+/// complete declaration of product identifiers that can grant typed access and
+/// validates StoreKit product type and group metadata before publication.
 public struct AutoRenewableSubscriptionCatalog<Entitlement>: Sendable
 where Entitlement: Hashable & Sendable {
     package let subscriptionGroupID: SubscriptionGroupID
@@ -9,6 +13,10 @@ where Entitlement: Hashable & Sendable {
     private let entitlementsByProductID: [Product.ID: Entitlement]
 
     /// Creates and validates a catalog from one auto-renewable subscription group.
+    ///
+    /// An empty declaration, empty product identifier, or duplicate raw product
+    /// identifier is a programmer error. Multiple products may grant the same
+    /// entitlement.
     public init<Group>(_ groupType: Group.Type)
     where Group: AutoRenewableSubscriptionGroup<Entitlement> {
         let subscriptions = Group.subscriptions

@@ -1,27 +1,72 @@
 import StoreTransactionKit
 
-private enum EntitlementID: String, Hashable, Sendable {
-    case premium = "com.example.premium"
+public enum SubscriptionEntitlement: Hashable, Sendable {
+    case tier1
+    case tier2
+}
+
+public enum Plans: AutoRenewableSubscriptionGroup<SubscriptionEntitlement> {
+    public static let id = SubscriptionGroupID(
+        rawValue: "external-consumer.subscription-group"
+    )
+
+    public enum ProductID: String, Hashable, Sendable {
+        case tier1_Monthly = "external-consumer.subscription.tier1.monthly"
+        case tier1_Yearly = "external-consumer.subscription.tier1.yearly"
+        case tier2_Monthly = "external-consumer.subscription.tier2.monthly"
+        case tier2_Yearly = "external-consumer.subscription.tier2.yearly"
+    }
+
+    public static var subscriptions: StoreSubscriptions {
+        StoreSubscription(.tier1_Monthly, entitlement: .tier1)
+        StoreSubscription(.tier1_Yearly, entitlement: .tier1)
+        StoreSubscription(.tier2_Monthly, entitlement: .tier2)
+        StoreSubscription(.tier2_Yearly, entitlement: .tier2)
+    }
+}
+
+public let subscriptionCatalog = AutoRenewableSubscriptionCatalog(Plans.self)
+
+@MainActor
+public final class NotesViewModel {
+    private let store: TransactionStore<SubscriptionEntitlement>
+
+    public var canExportPDF: Bool {
+        store.isEntitled(to: .tier1)
+    }
+
+    public init(store: TransactionStore<SubscriptionEntitlement>) {
+        self.store = store
+    }
+}
+
+public actor AppTransactionDelegate: TransactionStoreDelegate {
+    public init() {}
+
+    public func decidePolicy(
+        for transaction: StoreTransactionSnapshot
+    ) async throws -> StoreTransactionHandlingPolicy {
+        .automatic
+    }
+
+    public func didFail(
+        with failure: StoreTransactionBackgroundFailure
+    ) async {
+        print("Background failure from \(failure.source)")
+    }
 }
 
 @main
 @MainActor
 struct Consumer {
     static func main() async throws {
-        let store = TransactionStore<EntitlementID>(
-            handleTransaction: { transaction in
-                print("Handle transaction \(transaction.id)")
-            },
-            reportFailure: { failure in
-                print("Background failure from \(failure.source)")
-            }
+        let delegate = AppTransactionDelegate()
+        let store = TransactionStore(
+            subscriptionCatalog: subscriptionCatalog,
+            delegate: delegate
         )
-
-        if let activeEntitlements = store.activeEntitlements {
-            print("Active entitlements: \(activeEntitlements)")
-        } else {
-            print("Active entitlements are unresolved")
-        }
+        let viewModel = NotesViewModel(store: store)
+        print("Can export PDF: \(viewModel.canExportPDF)")
         try await store.close()
     }
 }

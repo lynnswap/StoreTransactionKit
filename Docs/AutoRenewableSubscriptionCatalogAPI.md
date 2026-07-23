@@ -102,7 +102,7 @@ enum Plans: AutoRenewableSubscriptionGroup<SubscriptionEntitlement> {
         rawValue: "YOUR_SUBSCRIPTION_GROUP_ID"
     )
 
-    enum ProductID: String {
+    enum ProductID: String, Hashable, Sendable {
         case tier1_Monthly = "com.example.subscription.tier1.monthly"
         case tier1_Yearly = "com.example.subscription.tier1.yearly"
         case tier2_Monthly = "com.example.subscription.tier2.monthly"

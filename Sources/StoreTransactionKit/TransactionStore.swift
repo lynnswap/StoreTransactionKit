@@ -2,6 +2,11 @@ import Observation
 import StoreKit
 
 /// An observable, process-owned StoreKit transaction and entitlement store.
+///
+/// A live store monitors StoreKit deliveries, owns `Transaction.finish()`
+/// authority, and publishes raw and app-defined entitlement state together on
+/// the main actor. Create one live instance at the application composition root
+/// and retain it for the process lifetime.
 @MainActor
 @Observable
 public final class TransactionStore<Entitlement>
@@ -35,6 +40,9 @@ where Entitlement: Hashable & Sendable {
     }
 
     /// The availability of the typed entitlement projection.
+    ///
+    /// Inspect this value when the UI needs to distinguish loading or failure
+    /// from a ready empty entitlement set.
     public var entitlementStatus: EntitlementStatus {
         switch availability {
         case .loading:
@@ -49,6 +57,9 @@ where Entitlement: Hashable & Sendable {
     }
 
     /// The latest complete raw StoreKit entitlement projection.
+    ///
+    /// This value is non-`nil` only in ``EntitlementStatus/ready``. Override
+    /// mode has no synthetic raw StoreKit projection.
     public var entitlements: StoreEntitlements? {
         guard case .ready(let entitlements, _) = availability else {
             return nil
@@ -57,6 +68,10 @@ where Entitlement: Hashable & Sendable {
     }
 
     /// The app-defined entitlements granted by the current catalog projection.
+    ///
+    /// A non-`nil` empty set authoritatively means that no declared entitlement
+    /// is active. The value is `nil` while loading or when no usable projection
+    /// is available after failure.
     public var activeEntitlements: Set<Entitlement>? {
         switch availability {
         case .ready(_, let activeEntitlements),
@@ -71,7 +86,12 @@ where Entitlement: Hashable & Sendable {
     @ObservationIgnored private let backend: Backend
     private var availability: EntitlementAvailability
 
-    /// Creates one live StoreKit store for an auto-renewable subscription catalog.
+    /// Creates the process's live StoreKit store for an auto-renewable subscription catalog.
+    ///
+    /// Initialization starts transaction monitoring and the first entitlement
+    /// reconciliation. The store strongly retains `delegate` until terminal
+    /// shutdown. Creating a second live store in the same process before the
+    /// first store finishes ``close()`` is a programmer error.
     public convenience init(
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
         delegate: (any TransactionStoreDelegate)? = nil
@@ -88,6 +108,10 @@ where Entitlement: Hashable & Sendable {
     }
 
     /// Creates a StoreKit-free store with one authoritative entitlement set.
+    ///
+    /// The sequence is normalized to a set and published immediately with
+    /// ``EntitlementStatus/overridden``. This store performs no StoreKit work,
+    /// has no raw ``entitlements``, and rejects StoreKit-backed operations.
     public convenience init(
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
         overridingEntitlements: some Sequence<Entitlement>
@@ -201,11 +225,18 @@ where Entitlement: Hashable & Sendable {
     }
 
     /// Returns whether the exact app-defined entitlement is active.
+    ///
+    /// This method returns `false` while entitlement state is unavailable.
     public func isEntitled(to entitlement: Entitlement) -> Bool {
         activeEntitlements?.contains(entitlement) == true
     }
 
     /// Processes a direct result from custom purchase UI.
+    ///
+    /// A successful verified purchase completes only after policy selection,
+    /// finishing, causal entitlement reconciliation, and main-actor publication.
+    /// Pending and user-cancelled results return their corresponding semantic
+    /// outcome without transaction processing.
     public func process(
         _ result: Product.PurchaseResult
     ) async throws -> StorePurchaseOutcome {
@@ -246,7 +277,9 @@ where Entitlement: Hashable & Sendable {
         return snapshot
     }
 
-    /// Refreshes and publishes the current StoreKit entitlement projection.
+    /// Reconciles unfinished transactions and publishes current entitlements.
+    ///
+    /// Raw and typed entitlement values are validated and committed atomically.
     @discardableResult
     public func refreshEntitlements() async throws -> StoreEntitlements {
         let admission = try admit(operation: .refreshEntitlements)
@@ -256,6 +289,8 @@ where Entitlement: Hashable & Sendable {
     }
 
     /// Returns verified transaction history for one product.
+    ///
+    /// Results are all-or-nothing and ordered newest first.
     public func history(
         for productID: Product.ID
     ) async throws -> [StoreTransactionSnapshot] {
@@ -267,6 +302,10 @@ where Entitlement: Hashable & Sendable {
     }
 
     /// Synchronizes App Store purchases and refreshes entitlements.
+    ///
+    /// If synchronization succeeds but refresh fails, this method throws
+    /// ``StoreTransactionError/entitlementRefreshFailed(after:underlyingError:)``
+    /// with ``StoreTransactionError/CompletedOperation/synchronizedPurchases``.
     @discardableResult
     public func restorePurchases() async throws -> StoreEntitlements {
         let admission = try admit(operation: .restorePurchases)
@@ -276,6 +315,12 @@ where Entitlement: Hashable & Sendable {
     }
 
     /// Stops producers and drains every operation accepted before closing.
+    ///
+    /// The first call seals admission and starts one shared terminal shutdown.
+    /// Concurrent calls join it, and later calls return successfully. Caller
+    /// cancellation does not abandon shutdown. Calling this method from a
+    /// callback owned by this store throws
+    /// ``StoreTransactionError/reentrantOperation(operation:)``.
     public func close() async throws {
         try rejectReentrancy(operation: .close)
         switch backend {

@@ -22,9 +22,6 @@ In Xcode, choose **File > Add Package Dependencies**, enter
 
 ## Quick start
 
-The APIs shown below are proposed for the next beta. The current source does not
-implement them yet.
-
 Define the app's entitlements and one App Store Connect auto-renewable
 subscription group:
 
@@ -41,7 +38,7 @@ enum Plans: AutoRenewableSubscriptionGroup<SubscriptionEntitlement> {
         rawValue: "YOUR_SUBSCRIPTION_GROUP_ID"
     )
 
-    enum ProductID: String {
+    enum ProductID: String, Hashable, Sendable {
         case tier1_Monthly = "com.example.subscription.tier1.monthly"
         case tier1_Yearly = "com.example.subscription.tier1.yearly"
         case tier2_Monthly = "com.example.subscription.tier2.monthly"
@@ -176,8 +173,28 @@ durable transaction effect, handles a product outside the subscription catalog,
 or needs background-failure notifications. Without a delegate, automatic
 handling finishes only catalog-validated auto-renewable subscriptions.
 
-For policy, redelivery, failure routing, and shutdown contracts, see the
-[API design](Docs/AutoRenewableSubscriptionCatalogAPI.md).
+Return `.finish` only after applying an app-owned effect durably. Throwing leaves
+the transaction unfinished so a later StoreKit delivery can retry it.
+
+```swift
+actor AppTransactionDelegate: TransactionStoreDelegate {
+    func decidePolicy(
+        for transaction: StoreTransactionSnapshot
+    ) async throws -> StoreTransactionHandlingPolicy {
+        try await purchaseLedger.apply(transaction)
+        return .finish
+    }
+
+    func didFail(
+        with failure: StoreTransactionBackgroundFailure
+    ) async {
+        diagnostics.record(failure)
+    }
+}
+```
+
+The store serializes policy decisions and background notifications separately.
+Do not call back into the same store from either delegate method.
 
 ## Testing
 
@@ -185,6 +202,7 @@ App and ViewModel tests can use `StoreTransactionKitTesting` without a
 `.storekit` configuration:
 
 ```swift
+import StoreTransactionKit
 import StoreTransactionKitTesting
 import Testing
 
@@ -211,6 +229,9 @@ func subscriptionUpdatesViewModel() async throws {
 `purchase(_:,in:)` returns after the resulting entitlement publication, so the
 test needs no timing guess. Inject `TransactionStoreTestClock` into the app
 component that owns a delay or deadline.
+
+Add both `StoreTransactionKit` and `StoreTransactionKitTesting` to the test
+target. Keep only `StoreTransactionKit` in the production target.
 
 The app-hosted StoreKit integration suite continues to test the live adapter.
 See [Tools/TestApp/README.md](Tools/TestApp/README.md) for its scenarios and

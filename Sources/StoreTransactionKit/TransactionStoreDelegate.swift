@@ -7,20 +7,24 @@ public enum StoreTransactionHandlingPolicy: Sendable, Hashable {
     case automatic
 
     /// Finishes a transaction after the app has durably applied its business effect.
+    ///
+    /// Use this policy for an unmanaged product only after the app has committed
+    /// its idempotent business effect.
     case finish
 }
 
 /// Receives transaction decisions and background failure notifications.
 ///
 /// The delegate is optional because both requirements have default
-/// implementations. Conforming types may use an actor or provide their own
-/// synchronization; the protocol does not prescribe an actor.
+/// implementations. Policy decisions and failure notifications are each
+/// serialized, but the two streams may overlap.
 public protocol TransactionStoreDelegate: AnyObject, Sendable {
     /// Chooses how to handle a verified transaction.
     ///
-    /// StoreTransactionKit invokes decisions serially. Throwing prevents the
-    /// transaction from being finished and prevents its causal entitlement
-    /// refresh.
+    /// StoreTransactionKit invokes decisions serially after catalog
+    /// classification. Throwing prevents the transaction from being finished
+    /// and prevents its causal entitlement refresh. A later independent
+    /// StoreKit delivery may retry the exact revision.
     func decidePolicy(
         for transaction: StoreTransactionSnapshot
     ) async throws -> StoreTransactionHandlingPolicy
@@ -28,8 +32,9 @@ public protocol TransactionStoreDelegate: AnyObject, Sendable {
     /// Notifies the delegate of a failure owned by background work.
     ///
     /// This notification cannot alter the completed operation or request a
-    /// retry. When a failure changes observable entitlement state, that state
-    /// is committed before this method begins.
+    /// retry. Delivery is serialized and applies backpressure. When a failure
+    /// changes observable entitlement state, that state is committed before
+    /// this method begins.
     func didFail(
         with failure: StoreTransactionBackgroundFailure
     ) async

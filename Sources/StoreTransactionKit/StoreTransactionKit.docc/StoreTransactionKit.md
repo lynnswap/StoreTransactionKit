@@ -1,62 +1,68 @@
 # ``StoreTransactionKit``
 
-Own StoreKit 2 transaction monitoring at application lifetime and finish each
-verified transaction only after its durable business effect succeeds.
+Centralize verified transaction handling, `Transaction.finish()` authority,
+and observable subscription access in one process-owned store.
 
 ## Overview
 
-StoreKit can deliver a purchase as a direct `Product.PurchaseResult`, through
-`Transaction.updates`, or as unfinished work on a later launch.
-``TransactionStore`` normalizes these paths into one verified, FIFO transaction
-processor and publishes observable current-entitlement state. It supports
-iOS and Mac Catalyst 18.4 and later, macOS 15.4 and later, tvOS 18.4 and
-later, watchOS 11.4 and later, and visionOS 2.4 and later.
+StoreKit can deliver the same purchase through a direct
+`Product.PurchaseResult`, `Transaction.updates`, and unfinished-transaction
+reconciliation. ``TransactionStore`` joins those paths by exact transaction
+revision, applies one handling policy, and publishes raw and app-defined
+entitlement state together on the main actor.
 
-Create one store in the application composition root and retain it for the
-process lifetime; call ``TransactionStore/close()`` only from controlled
-shutdown and test lifecycles. Supply an idempotent transaction handler that
-commits the app's business effect before returning. The app defines a
-string-backed entitlement identifier type;
-``TransactionStore/activeEntitlements`` then exposes an optional typed set
-derived from StoreKit's verified current entitlements. Pass direct results
-from custom purchase UI into ``TransactionStore/process(_:)``.
+Define one ``AutoRenewableSubscriptionCatalog`` from the Product IDs in an App
+Store Connect subscription group. Several products, such as monthly and yearly
+durations, may grant the same app entitlement. Create one live store at the
+application composition root and inject that instance into feature code.
 
-<doc:UnderstandingTransactionHandling> describes the full model: delivery
-paths and deduplication, unfinished-transaction reconciliation before each
-entitlement publication, verification-failure reporting, and how the
-projection behaves across upgrades, revocations, and grace periods.
+Use ``TransactionStore/isEntitled(to:)`` for feature gating. When UI needs to
+explain unavailable access, inspect ``TransactionStore/entitlementStatus`` to
+distinguish the initial load, failure, a ready empty set, and an app-supplied
+override.
 
-The framework owns StoreKit verification, process-local exact-revision
-coalescing, `finish()`, entitlement refresh, history ordering, restore
-synchronization, background failure delivery, and explicit shutdown. The app
-continues to own persistence, server communication, access presentation, the
-concrete purchase scene or window, raw `Product.SubscriptionInfo.Status`
-interpretation for renewal UI, and, where the API is available,
-`PurchaseIntent.intents` handling for purchases that begin outside the app.
+The optional ``TransactionStoreDelegate`` owns only app-specific durable
+effects and background-failure reactions. Without a delegate, the default
+policy finishes catalog-managed auto-renewable subscriptions. StoreTransactionKit
+still verifies deliveries, reconciles unfinished work, validates catalog
+metadata, orders history, restores purchases, reports background failures, and
+drains admitted work during explicit shutdown.
 
-> Important: StoreTransactionKit exposes an at-least-once handler-delivery
-> contract. Make the injected transaction handler durably idempotent using
-> transaction identity and the business event it applies. Purchase and
-> revocation revisions are distinct business events. Do not call StoreKit
-> `finish()` or call back into the same store from the handler.
+Start with <doc:DefiningSubscriptionAccess>, then read
+<doc:UnderstandingTransactionHandling> before adding an app-owned transaction
+effect. <doc:TestingSubscriptionAccess> shows StoreKit-free ViewModel tests
+that use the production store data flow.
 
 ## Topics
 
 ### Essentials
 
+- <doc:DefiningSubscriptionAccess>
 - <doc:UnderstandingTransactionHandling>
+- <doc:TestingSubscriptionAccess>
 
-### Creating a store
+### Declaring subscriptions
+
+- ``AutoRenewableSubscriptionCatalog``
+- ``AutoRenewableSubscriptionGroup``
+- ``SubscriptionGroupID``
+- ``StoreSubscription``
+- ``StoreSubscriptionsBuilder``
+
+### Reading entitlement state
 
 - ``TransactionStore``
+- ``EntitlementStatus``
 - ``StoreEntitlements``
 
-### Processing purchases
+### Processing transactions
 
+- ``TransactionStoreDelegate``
+- ``StoreTransactionHandlingPolicy``
 - ``StorePurchaseOutcome``
 - ``StoreTransactionSnapshot``
 
-### Diagnosing lifecycle and background work
+### Failures and lifecycle
 
 - ``StoreTransactionError``
 - ``StoreTransactionVerificationError``

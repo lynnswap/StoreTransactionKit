@@ -29,6 +29,25 @@ let package = Package(
                 .defaultIsolation(nil),
                 .strictMemorySafety(),
             ]
-        )
+        ),
+        .testTarget(
+            name: "ConsumerTests",
+            dependencies: [
+                "Consumer",
+                .product(
+                    name: "StoreTransactionKit",
+                    package: "StoreTransactionKit"
+                ),
+                .product(
+                    name: "StoreTransactionKitTesting",
+                    package: "StoreTransactionKit"
+                ),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .defaultIsolation(nil),
+                .strictMemorySafety(),
+            ]
+        ),
     ]
 )
