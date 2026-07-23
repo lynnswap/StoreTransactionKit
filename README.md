@@ -127,7 +127,9 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $isShowingPaywall) {
-            SubscriptionStoreView(groupID: Plans.id.rawValue)
+            SubscriptionStoreView(
+                productIDs: Plans.subscriptions.map(\.id.rawValue)
+            )
         }
     }
 }
@@ -135,7 +137,8 @@ struct ContentView: View {
 
 No `onInAppPurchaseCompletion` modifier is needed for the default StoreKit-view
 flow. Successful purchases arrive through `Transaction.updates`, which the
-store monitors. Use the same Product IDs in the active `.storekit`
+store monitors. Passing this binary's declared Product IDs keeps its paywall
+aligned with the catalog. Use the same Product IDs in the active `.storekit`
 configuration when running local StoreKit tests.
 
 ## Entitlement availability
@@ -166,12 +169,53 @@ let store = TransactionStore(
 )
 ```
 
+## Unrecognized subscriptions
+
+A product added to the same subscription group after this binary ships can
+still arrive through another device or purchase path. By default, the store
+keeps the verified raw transaction, grants no typed entitlement, and leaves an
+unfinished delivery unfinished.
+
+Supply a separate delegate only when the app knows how to handle that product:
+
+```swift
+actor AppUnrecognizedSubscriptionDelegate:
+    UnrecognizedSubscriptionDelegate<SubscriptionEntitlement>
+{
+    func decidePolicy(
+        forUnrecognizedSubscription transaction: StoreTransactionSnapshot
+    ) async throws
+        -> UnrecognizedSubscriptionPolicy<SubscriptionEntitlement>
+    {
+        switch transaction.productID {
+        case "com.example.subscription.tier1.weekly":
+            .treatAs(.tier1)
+
+        default:
+            .leaveUnfinished
+        }
+    }
+}
+
+let store = TransactionStore(
+    subscriptionCatalog: subscriptionCatalog,
+    unrecognizedSubscriptionDelegate:
+        AppUnrecognizedSubscriptionDelegate()
+)
+```
+
+Return `.finish` to finish without granting typed access, or
+`.treatAs(entitlement)` to finish and grant a known entitlement. See
+[Understanding transaction handling](Sources/StoreTransactionKit/StoreTransactionKit.docc/UnderstandingTransactionHandling.md)
+for the complete policy contract.
+
 ## Transaction delegate
 
-The delegate is optional. Supply one only when the app owns an additional
-durable transaction effect, handles a product outside the subscription catalog,
-or needs background-failure notifications. Without a delegate, automatic
-handling finishes only catalog-validated auto-renewable subscriptions.
+`TransactionStoreDelegate` is separate from
+`UnrecognizedSubscriptionDelegate`. Supply it only when the app owns an
+additional durable effect for a declared or out-of-group transaction, or needs
+background-failure notifications. Without it, automatic handling finishes
+catalog-declared auto-renewable subscriptions.
 
 Return `.finish` only after applying an app-owned effect durably. Throwing leaves
 the transaction unfinished so a later StoreKit delivery can retry it.
@@ -193,8 +237,9 @@ actor AppTransactionDelegate: TransactionStoreDelegate {
 }
 ```
 
-The store serializes policy decisions and background notifications separately.
-Do not call back into the same store from either delegate method.
+Calls to each policy delegate are serialized; background notifications use a
+separate serialized path. Do not call admission-bearing operations on the same
+store from either delegate.
 
 ## Testing
 

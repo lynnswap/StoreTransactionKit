@@ -59,7 +59,8 @@ where Entitlement: Hashable & Sendable {
     /// The latest complete raw StoreKit entitlement projection.
     ///
     /// This value is non-`nil` only in ``EntitlementStatus/ready``. Override
-    /// mode has no synthetic raw StoreKit projection.
+    /// mode has no synthetic raw StoreKit projection. A ready projection can
+    /// include a valid same-group product that this binary doesn't declare.
     public var entitlements: StoreEntitlements? {
         guard case .ready(let entitlements, _) = availability else {
             return nil
@@ -69,9 +70,11 @@ where Entitlement: Hashable & Sendable {
 
     /// The app-defined entitlements granted by the current catalog projection.
     ///
-    /// A non-`nil` empty set authoritatively means that no declared entitlement
-    /// is active. The value is `nil` while loading or when no usable projection
-    /// is available after failure.
+    /// A non-`nil` empty set authoritatively means that no app entitlement is
+    /// active. Declared products use the catalog mapping; an unrecognized
+    /// subscription contributes only when its delegate policy uses
+    /// ``UnrecognizedSubscriptionPolicy/treatAs(_:)``. The value is `nil` while
+    /// loading or when no usable projection is available after failure.
     public var activeEntitlements: Set<Entitlement>? {
         switch availability {
         case .ready(_, let activeEntitlements),
@@ -91,7 +94,9 @@ where Entitlement: Hashable & Sendable {
     /// Initialization starts transaction monitoring and the first entitlement
     /// reconciliation. The store strongly retains both delegates until terminal
     /// shutdown. Creating a second live store in the same process before the
-    /// first store finishes ``close()`` is a programmer error.
+    /// first store finishes ``close()`` is a programmer error. Without
+    /// `unrecognizedSubscriptionDelegate`, valid undeclared same-group
+    /// subscriptions use ``UnrecognizedSubscriptionPolicy/leaveUnfinished``.
     public convenience init(
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
         delegate: (any TransactionStoreDelegate)? = nil,

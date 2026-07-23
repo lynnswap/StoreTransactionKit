@@ -18,29 +18,45 @@ ledger: process launch or eviction can present the revision again. If a
 durably idempotent for the business event. Transaction ID alone is insufficient
 because a later signed revision can describe a revocation or another change.
 
+The successful ``UnrecognizedSubscriptionDelegate`` decision for an exact
+revision is instead reused for the store session so transaction handling and
+typed projection can't disagree. A thrown decision isn't cached; a later
+independent delivery may ask again.
+
 ## Policy and finishing
 
-The catalog validates and classifies every verified transaction before asking
-the delegate for ``TransactionStoreDelegate/decidePolicy(for:)``:
+The catalog validates and classifies every verified transaction before choosing
+its policy owner:
 
 - A declared auto-renewable subscription with matching group metadata is
-  managed. ``StoreTransactionHandlingPolicy/automatic`` and
+  managed by ``TransactionStoreDelegate``.
+  ``StoreTransactionHandlingPolicy/automatic`` and
   ``StoreTransactionHandlingPolicy/finish`` both allow finishing it.
 - A product outside the catalog's group is unmanaged. `.automatic` throws
   ``StoreTransactionError/unhandledTransaction(productID:productType:)``;
   `.finish` allows finishing only after the app has durably handled it.
-- Contradictory metadata or an undeclared current product inside the managed
-  group fails catalog validation before the delegate runs and is never
-  finished.
+- A valid, non-upgraded auto-renewable subscription in the catalog's group whose
+  Product ID this binary doesn't declare is resolved by
+  ``UnrecognizedSubscriptionDelegate``. ``UnrecognizedSubscriptionPolicy/leaveUnfinished``
+  grants no typed access and doesn't call `finish()`;
+  ``UnrecognizedSubscriptionPolicy/finish`` finishes without a typed grant; and
+  ``UnrecognizedSubscriptionPolicy/treatAs(_:)`` finishes and maps the exact
+  revision to a known app entitlement.
+- Contradictory metadata, such as a declared Product ID arriving with the wrong
+  product type or group, fails catalog validation before either delegate runs.
 
-If the delegate throws, the framework does not finish the transaction or start
-its causal entitlement refresh. A later independent StoreKit delivery opens a
-new attempt; the framework adds no timer or retry loop.
+Without an unrecognized-subscription delegate, `.leaveUnfinished` is the
+default. It is a successful policy rather than a failure or retry request.
+If either policy delegate throws, the framework doesn't finish the transaction
+or start its causal entitlement refresh. A later independent StoreKit delivery
+opens a new attempt; the framework adds no timer or retry loop.
 
-For a successful purchase,
-``TransactionStore/process(_:)`` returns
-``StorePurchaseOutcome/completed(_:)`` only after policy, `finish()`, unfinished
-reconciliation, catalog projection, and main-actor publication complete.
+For a verified purchase, ``TransactionStore/process(_:)`` returns only after
+policy, the selected finish or leave action, unfinished reconciliation, catalog
+projection, and main-actor publication complete.
+``StorePurchaseOutcome/completed(_:)`` means the transaction was finished.
+``StorePurchaseOutcome/leftUnfinished(_:)`` means the unrecognized-product
+decision and publication completed without calling `finish()`.
 If the refresh fails after `finish()`, the method instead throws
 ``StoreTransactionError/entitlementRefreshFailed(after:underlyingError:)`` with
 ``StoreTransactionError/CompletedOperation/finishedTransaction(_:)``. Retry
@@ -53,11 +69,13 @@ with ``StoreTransactionError/CompletedOperation/synchronizedPurchases``.
 
 ## Reconciliation and publication
 
-The initial load and every entitlement refresh handle all verified unfinished
+The initial load and every entitlement refresh evaluate verified unfinished
 transactions before publishing `Transaction.currentEntitlements`. This keeps
-the observable projection from running ahead of unfinished durable work.
+the observable projection from running ahead of unfinished durable work. A
+revision resolved as `.leaveUnfinished` remains unfinished in StoreKit but
+doesn't block publication or repeat its decision in the same store session.
 Current entitlements that were finished by another process or device may still
-appear without a local policy invocation.
+require an unrecognized-subscription decision for typed projection.
 
 ``TransactionStore/entitlements``,
 ``TransactionStore/activeEntitlements``, and
@@ -79,9 +97,13 @@ refresh publishes a new ready snapshot.
 The catalog maps declared Product IDs to app entitlement values. It does not
 copy StoreKit group levels or subscription periods into the entitlement type,
 and multiple Product IDs may map to the same value. A transaction that StoreKit
-marks as upgraded grants no typed access. The raw projection otherwise mirrors
-the verified current-entitlement items StoreKit returns, including products
-outside the managed group.
+marks as upgraded grants no typed access. A valid unrecognized same-group
+product remains in the raw projection without making readiness fail.
+`.leaveUnfinished` and `.finish` grant no typed access;
+`.treatAs(entitlement)` adds the selected value. A thrown unrecognized decision
+is a transient failure, not a catalog contradiction. The raw projection
+otherwise mirrors the verified current-entitlement items StoreKit returns,
+including products outside the managed group.
 
 StoreKit excludes revoked or refunded transactions from current entitlements.
 For billing retry, grace period, and renewal presentation, use
@@ -102,11 +124,15 @@ unfinished reconciliation, current-entitlement verification failures, and
 abandoned direct operations. The callback is a notification after the failure;
 it cannot change policy or request retry.
 
+An unrecognized `.leaveUnfinished` decision is successful and produces no
+background failure. If the unrecognized-subscription delegate throws, the same
+direct-versus-background failure ownership rules apply.
+
 Failures that affect observable entitlement state commit that state before
 notification begins. Notifications are serialized with backpressure and
 ``TransactionStore/close()`` drains every admitted notification. Policy
-decisions are also serialized, but policy and notification execution may
-overlap.
+decisions are serialized by their respective owners, but the policy and
+notification paths may overlap.
 
 An unverified direct purchase throws ``StoreTransactionVerificationError`` to
 its caller. An unverified background element is reported instead. Unverified
@@ -127,9 +153,9 @@ When closing has sealed admission, a new operation throws
 backend and its StoreKit operations throw
 ``StoreTransactionError/operationUnavailableInOverride(operation:)``.
 
-Delegate methods must not call an admission-bearing operation on the same
-store. Such a call can wait behind the callback that is making it. Reentry with
-inherited callback context throws
+Methods of either delegate must not call an admission-bearing operation on the
+same store. Such a call can wait behind the callback that is making it. Reentry
+with inherited callback context throws
 ``StoreTransactionError/reentrantOperation(operation:)``. A detached task does
 not inherit that detection context, but awaiting one from the callback still
 creates the same dependency cycle and must also be avoided.
@@ -145,8 +171,9 @@ The first ``TransactionStore/close()`` call atomically seals public and producer
 admission and starts one terminal shutdown. Concurrent close calls join the same
 completion, and caller cancellation does not abandon it. Shutdown stops StoreKit
 producers, drains admitted producer elements and public operations, drains
-transaction, refresh, restore, and failure workers, releases the delegate, and
-then releases the live-store lease. The last entitlement state remains readable.
+transaction, refresh, restore, policy, and failure workers, clears the
+unrecognized-policy cache, releases both delegates, and then releases the live
+store lease. The last entitlement state remains readable.
 
 Calling `close()` from a callback owned by the same store throws a reentrancy
 error. Production apps normally retain the store for process lifetime; explicit

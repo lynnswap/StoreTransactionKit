@@ -3,7 +3,7 @@ import StoreKit
 
 /// An inconsistency between a transaction snapshot and a subscription catalog.
 public enum AutoRenewableSubscriptionCatalogError: LocalizedError, Sendable {
-    /// A catalog product isn't an auto-renewable subscription.
+    /// A declared or same-group product isn't an auto-renewable subscription.
     case productTypeMismatch(
         productID: Product.ID,
         actual: Product.ProductType

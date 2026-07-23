@@ -51,6 +51,47 @@ A later purchase in the same group replaces the active synthetic product. The
 harness models immediate current access; it does not simulate renewal timing,
 billing retry, upgrade scheduling, expiration, or revocation.
 
+## Exercise an unrecognized subscription
+
+Create an undeclared same-group revision separately from delivering it. The
+split lets a test replay the exact revision and verify both successful policy
+caching and retry after a thrown decision:
+
+```swift
+actor LegacyPlanDelegate:
+    UnrecognizedSubscriptionDelegate<SubscriptionEntitlement>
+{
+    func decidePolicy(
+        forUnrecognizedSubscription transaction: StoreTransactionSnapshot
+    ) async throws
+        -> UnrecognizedSubscriptionPolicy<SubscriptionEntitlement>
+    {
+        .treatAs(.tier1)
+    }
+}
+
+let delegate = LegacyPlanDelegate()
+
+try await withTransactionStoreTestHarness(
+    subscriptionCatalog: subscriptionCatalog,
+    unrecognizedSubscriptionDelegate: delegate
+) { harness in
+    let transaction = try harness.makeUnrecognizedSubscription(
+        productID: "com.example.subscription.tier1.weekly",
+        in: Plans.self
+    )
+
+    let outcome = try await harness.deliver(transaction)
+
+    #expect(outcome == .completed(transaction))
+    #expect(harness.store.isEntitled(to: .tier1))
+}
+```
+
+`purchase(_:,in:)` remains the typed shortcut for a catalog-declared product.
+`deliver(_:)` accepts only an exact synthetic snapshot registered by that
+harness.
+
 The returned ``StoreTransactionSnapshot`` is synthetic. Its
 ``StoreTransactionSnapshot/jwsRepresentation`` is a deterministic sentinel, not
 a signed JWS, and its transaction identifier is local to that harness. Use

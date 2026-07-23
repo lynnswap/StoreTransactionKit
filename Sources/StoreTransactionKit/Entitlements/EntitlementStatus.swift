@@ -11,7 +11,8 @@ public enum EntitlementStatus: Sendable {
     /// A complete live entitlement snapshot is available.
     ///
     /// Both raw and typed entitlement collections are authoritative in this
-    /// state, including when they are empty.
+    /// state, including when they are empty. The raw collection may contain an
+    /// unrecognized same-group subscription that grants no typed entitlement.
     case ready
 
     /// App-supplied entitlements are authoritative instead of StoreKit state.
