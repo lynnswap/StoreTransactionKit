@@ -35,7 +35,8 @@ where Entitlement: Hashable & Sendable {
         delegate: (any TransactionStoreDelegate)?,
         entitlementOutcome:
             @escaping @Sendable (EntitlementRefreshOutcome<Entitlement>) async
-            -> Void
+            -> Void,
+        entitlementReservationDidEnqueue: (@Sendable () -> Void)? = nil
     ) {
         self.source = source
         self.lifecycle = lifecycle
@@ -102,7 +103,8 @@ where Entitlement: Hashable & Sendable {
             },
             didComplete: entitlementOutcome,
             failures: failures,
-            lifetime: lifecycle
+            lifetime: lifecycle,
+            reservationDidEnqueue: entitlementReservationDidEnqueue
         )
         self.entitlements = entitlements
 

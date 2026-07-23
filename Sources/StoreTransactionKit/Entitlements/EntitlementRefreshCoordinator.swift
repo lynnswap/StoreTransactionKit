@@ -51,6 +51,7 @@ where Entitlement: Hashable & Sendable {
     private let didComplete: @Sendable (EntitlementRefreshOutcome<Entitlement>) async -> Void
     private let failures: FailureReporterDispatcher
     private let lifetime: TransactionStoreLifecycle?
+    private let reservationDidEnqueue: (@Sendable () -> Void)?
     private var current: StoreEntitlements?
     private var pending: [PendingWork] = []
     private var worker: Task<Void, Never>?
@@ -68,13 +69,15 @@ where Entitlement: Hashable & Sendable {
             @escaping @Sendable (EntitlementRefreshOutcome<Entitlement>) async
             -> Void,
         failures: FailureReporterDispatcher,
-        lifetime: TransactionStoreLifecycle? = nil
+        lifetime: TransactionStoreLifecycle? = nil,
+        reservationDidEnqueue: (@Sendable () -> Void)? = nil
     ) {
         self.query = query
         self.project = project
         self.didComplete = didComplete
         self.failures = failures
         self.lifetime = lifetime
+        self.reservationDidEnqueue = reservationDidEnqueue
     }
 
     package func reserve(
@@ -119,6 +122,7 @@ where Entitlement: Hashable & Sendable {
                 )
             )
         )
+        reservationDidEnqueue?()
         startWorkerIfNeeded()
         return EntitlementRefreshReservation(
             receipt: receipt,

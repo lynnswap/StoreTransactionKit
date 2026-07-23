@@ -215,6 +215,198 @@ struct RuntimeContractCoverageTests {
         try await store.close()
     }
 
+    @Test(
+        "coalesced direct operations preserve caller errors and one abandoned report"
+    )
+    func coalescedDirectOperationFailureOwnership() async throws {
+        let query = ControlledEntitlementQuery()
+        let reservations = TestCounterSignal()
+        let synchronizations = TestCounterSignal()
+        let finishes = TestCounterSignal()
+        let delegate = RecordingFailureDelegate()
+        let fixture = TestSourceFixture(
+            currentEntitlements: { try await query.next() },
+            synchronize: { synchronizations.send() }
+        )
+        let lifecycle = TransactionStoreLifecycle()
+        let runtime = StoreTransactionRuntime(
+            sessionID: UUID(),
+            source: fixture.source,
+            lifecycle: lifecycle,
+            subscriptionCatalog: testSubscriptionCatalog,
+            delegate: delegate,
+            entitlementOutcome: { _ in },
+            entitlementReservationDidEnqueue: {
+                reservations.send()
+            }
+        )
+        runtime.start()
+
+        try await query.waitForRequest(1)
+        #expect(reservations.value() == 1)
+
+        let firstSnapshot = makeSubscriptionSnapshot(
+            id: 306,
+            productID: .tier1Monthly,
+            revision: "coalesced-first"
+        )
+        let firstProcess = Task {
+            try await runtime.process(
+                .verified(
+                    makeEnvelope(
+                        snapshot: firstSnapshot,
+                        revision: "coalesced-first"
+                    ) {
+                        finishes.send()
+                    }
+                ),
+                leases: try lifecycle.beginOperation()
+            )
+        }
+        let firstRestore = Task {
+            try await runtime.restorePurchases(
+                leases: try lifecycle.beginOperation()
+            )
+        }
+        let firstRefresh = Task {
+            try await runtime.currentEntitlements(
+                leases: try lifecycle.beginOperation()
+            )
+        }
+
+        try await reservations.wait(for: 4)
+        #expect(finishes.value() == 1)
+        #expect(synchronizations.value() == 1)
+
+        await query.succeed([])
+        try await runtime.waitForInitialReadiness()
+        try await query.waitForRequest(2)
+        #expect(await fixture.entitlementQueryCount.value() == 2)
+        await query.fail(CoalescedRefreshFailure(batch: 1))
+
+        do {
+            _ = try await firstProcess.value
+            Issue.record("The process caller unexpectedly succeeded.")
+        } catch StoreTransactionError.entitlementRefreshFailed(
+            after: .finishedTransaction(let transaction),
+            underlyingError: let error
+        ) {
+            #expect(transaction == firstSnapshot)
+            #expect((error as? CoalescedRefreshFailure)?.batch == 1)
+        } catch {
+            Issue.record("The process caller received an unexpected error: \(error)")
+        }
+
+        do {
+            _ = try await firstRestore.value
+            Issue.record("The restore caller unexpectedly succeeded.")
+        } catch StoreTransactionError.entitlementRefreshFailed(
+            after: .synchronizedPurchases,
+            underlyingError: let error
+        ) {
+            #expect((error as? CoalescedRefreshFailure)?.batch == 1)
+        } catch {
+            Issue.record("The restore caller received an unexpected error: \(error)")
+        }
+
+        do {
+            _ = try await firstRefresh.value
+            Issue.record("The refresh caller unexpectedly succeeded.")
+        } catch let error as CoalescedRefreshFailure {
+            #expect(error.batch == 1)
+        } catch {
+            Issue.record("The refresh caller received an unexpected error: \(error)")
+        }
+        #expect((await delegate.failures()).isEmpty)
+
+        let separatingRefresh = Task {
+            try await runtime.currentEntitlements(
+                leases: try lifecycle.beginOperation()
+            )
+        }
+        try await reservations.wait(for: 5)
+        try await query.waitForRequest(3)
+
+        let secondSnapshot = makeSubscriptionSnapshot(
+            id: 307,
+            productID: .tier2Monthly,
+            revision: "coalesced-abandoned"
+        )
+        let secondProcess = Task {
+            try await runtime.process(
+                .verified(
+                    makeEnvelope(
+                        snapshot: secondSnapshot,
+                        revision: "coalesced-abandoned"
+                    ) {
+                        finishes.send()
+                    }
+                ),
+                leases: try lifecycle.beginOperation()
+            )
+        }
+        let secondRestore = Task {
+            try await runtime.restorePurchases(
+                leases: try lifecycle.beginOperation()
+            )
+        }
+        let secondRefresh = Task {
+            try await runtime.currentEntitlements(
+                leases: try lifecycle.beginOperation()
+            )
+        }
+
+        try await reservations.wait(for: 8)
+        #expect(finishes.value() == 2)
+        #expect(synchronizations.value() == 2)
+
+        secondProcess.cancel()
+        secondRestore.cancel()
+        secondRefresh.cancel()
+        await #expect(throws: CancellationError.self) {
+            _ = try await secondProcess.value
+        }
+        await #expect(throws: CancellationError.self) {
+            _ = try await secondRestore.value
+        }
+        await #expect(throws: CancellationError.self) {
+            _ = try await secondRefresh.value
+        }
+
+        await query.succeed([])
+        _ = try await separatingRefresh.value
+        try await query.waitForRequest(4)
+        #expect(await fixture.entitlementQueryCount.value() == 4)
+        await query.fail(CoalescedRefreshFailure(batch: 2))
+        try await delegate.waitForFailures(1)
+
+        await lifecycle.close {
+            await runtime.shutdown()
+        }
+
+        let failures = await delegate.failures()
+        #expect(failures.count == 1)
+        #expect(
+            (failures.first?.underlyingError as? CoalescedRefreshFailure)?
+                .batch == 2
+        )
+        if let source = failures.first?.source {
+            guard case .abandonedDirectOperation(let operation) = source else {
+                Issue.record("The failed batch had no abandoned direct owner.")
+                return
+            }
+            #expect(
+                [
+                    StoreTransactionOperation.processPurchase,
+                    .refreshEntitlements,
+                    .restorePurchases,
+                ].contains(operation)
+            )
+        }
+        #expect(reservations.value() == 8)
+        #expect(await fixture.entitlementQueryCount.value() == 4)
+    }
+
     @MainActor
     @Test("immediate purchase outcomes perform no transaction work")
     func immediatePurchaseOutcomes() async throws {
@@ -642,6 +834,10 @@ private final class NonCancellableGate: Sendable {
     func open() {
         receipt.succeed(())
     }
+}
+
+private struct CoalescedRefreshFailure: Error, Sendable {
+    let batch: Int
 }
 
 private actor ControlledSynchronization {

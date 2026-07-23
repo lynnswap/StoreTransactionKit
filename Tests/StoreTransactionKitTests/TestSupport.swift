@@ -54,6 +54,57 @@ actor TestSignal {
     }
 }
 
+final class TestCounterSignal: Sendable {
+    private struct Waiter: Sendable {
+        let target: Int
+        let receipt: ProcessingReceipt<Void>
+    }
+
+    private struct State: Sendable {
+        var count = 0
+        var waiters: [Waiter] = []
+    }
+
+    private let state = Mutex(State())
+
+    func send() {
+        let ready = state.withLock { state -> [ProcessingReceipt<Void>] in
+            state.count += 1
+            var ready: [ProcessingReceipt<Void>] = []
+            state.waiters.removeAll { waiter in
+                guard waiter.target <= state.count else { return false }
+                ready.append(waiter.receipt)
+                return true
+            }
+            return ready
+        }
+        for receipt in ready {
+            receipt.succeed(())
+        }
+    }
+
+    func wait(for target: Int) async throws {
+        precondition(target > 0)
+        let receipt = state.withLock {
+            state -> ProcessingReceipt<Void>? in
+            guard state.count < target else { return nil }
+            let receipt = ProcessingReceipt<Void>()
+            state.waiters.append(Waiter(target: target, receipt: receipt))
+            return receipt
+        }
+        guard let receipt else { return }
+        do {
+            try await receipt.value()
+        } catch is ProcessingReceiptWaiterCancellation {
+            throw CancellationError()
+        }
+    }
+
+    func value() -> Int {
+        state.withLock(\.count)
+    }
+}
+
 actor TestGate {
     private var isOpen = false
     private var waiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
