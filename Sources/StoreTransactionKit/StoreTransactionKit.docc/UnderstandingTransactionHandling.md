@@ -3,6 +3,23 @@
 Follow a transaction from admission through policy, finishing, entitlement
 publication, failure ownership, and shutdown.
 
+## App-owned purchase initiation
+
+StoreTransactionKit starts handling a purchase when the app passes a
+`Product.PurchaseResult` to ``TransactionStore/process(_:)`` or when the live
+store receives a transaction through StoreKit's monitoring or reconciliation
+paths. It doesn't observe `PurchaseIntent.intents` or initiate purchases.
+
+On platforms where `PurchaseIntent` is available, StoreKit can emit an intent
+for a supported App Store-initiated purchase, such as a promoted In-App Purchase
+or a win-back offer when Streamlined Purchasing is disabled. The app owns
+observing the sequence while it is running. Call `purchase(options:)` on the
+intent's product, include any purchase options required by the intent, and pass
+the resulting `Product.PurchaseResult` to
+``TransactionStore/process(_:)``. Completed purchases that StoreKit instead
+exposes through `Transaction.updates` or `Transaction.currentEntitlements`
+enter the store's monitoring and reconciliation paths without app forwarding.
+
 ## Exact-revision processing
 
 A direct `Product.PurchaseResult`, `Transaction.updates`, and
@@ -79,6 +96,11 @@ revision resolved as `.leaveUnfinished` remains unfinished in StoreKit but
 doesn't block publication or repeat its decision in the same store session.
 Current entitlements that were finished by another process or device may still
 require an unrecognized-subscription decision for typed projection.
+
+The live store observes `Product.SubscriptionInfo.Status.updates`.
+Subscription-status changes trigger current-entitlement reconciliation; status
+isn't a second entitlement source and isn't copied into the app's entitlement
+type.
 
 ``TransactionStore/entitlements``,
 ``TransactionStore/activeEntitlements``, and

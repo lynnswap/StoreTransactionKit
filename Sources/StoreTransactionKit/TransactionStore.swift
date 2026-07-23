@@ -91,12 +91,12 @@ where Entitlement: Hashable & Sendable {
 
     /// Creates the process's live StoreKit store for an auto-renewable subscription catalog.
     ///
-    /// Initialization starts transaction monitoring and the first entitlement
-    /// reconciliation. The store strongly retains both delegates until terminal
-    /// shutdown. Creating a second live store in the same process before the
-    /// first store finishes ``close()`` is a programmer error. Without
-    /// `unrecognizedSubscriptionDelegate`, valid non-upgraded undeclared
-    /// same-group subscriptions use
+    /// Initialization starts transaction and subscription-status monitoring,
+    /// along with the first entitlement reconciliation. The store strongly
+    /// retains both delegates until terminal shutdown. Creating a second live
+    /// store in the same process before the first store finishes ``close()`` is
+    /// a programmer error. Without `unrecognizedSubscriptionDelegate`, valid
+    /// non-upgraded undeclared same-group subscriptions use
     /// ``UnrecognizedSubscriptionPolicy/leaveUnfinished``.
     public convenience init(
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
@@ -257,8 +257,10 @@ where Entitlement: Hashable & Sendable {
         activeEntitlements?.contains(entitlement) == true
     }
 
-    /// Processes a direct result from custom purchase UI.
+    /// Processes a StoreKit purchase result supplied by the app.
     ///
+    /// Use this method for a result from `Product.purchase(options:)`, including
+    /// a purchase the app completes after observing `PurchaseIntent.intents`.
     /// A verified purchase returns only after policy selection, the selected
     /// finish or leave action, causal entitlement reconciliation, and main-actor
     /// publication. Pending and user-cancelled results return their corresponding
