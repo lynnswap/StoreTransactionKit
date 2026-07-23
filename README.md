@@ -140,7 +140,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $isShowingPaywall) {
             SubscriptionStoreView(
-                productIDs: Plans.subscriptions.map(\.id.rawValue)
+                productIDs: subscriptionCatalog.productIDs
             )
         }
     }
@@ -165,6 +165,24 @@ configuration when running local StoreKit tests.
 
 Keep normal app content usable while the entitlement set is unavailable. Gate
 only features that require an active purchase.
+
+## Product information
+
+Load the catalog's declared products when building custom subscription UI:
+
+```swift
+import StoreKit
+
+let products = try await Product.products(
+    for: subscriptionCatalog.productIDs
+)
+```
+
+`Product` supplies localized presentation, and `Product.SubscriptionInfo`
+supplies subscription level and period. `StoreTransactionSnapshot` remains the
+verified transaction projection. See
+[Defining subscription access](Sources/StoreTransactionKit/StoreTransactionKit.docc/DefiningSubscriptionAccess.md)
+for the complete mapping example.
 
 ## Override entitlements
 

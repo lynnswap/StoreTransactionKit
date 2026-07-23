@@ -7,10 +7,20 @@ import StoreKit
 /// and group metadata before publication.
 public struct AutoRenewableSubscriptionCatalog<Entitlement>: Sendable
 where Entitlement: Hashable & Sendable {
-    package let subscriptionGroupID: SubscriptionGroupID
+    private struct Entry: Sendable {
+        let entitlement: Entitlement
+    }
 
     private let declaringGroupTypeID: ObjectIdentifier
-    private let entitlementsByProductID: [Product.ID: Entitlement]
+    private let entriesByProductID: [Product.ID: Entry]
+
+    /// The subscription group identifier configured in App Store Connect.
+    public let subscriptionGroupID: SubscriptionGroupID
+
+    /// The declared product identifiers in declaration order.
+    ///
+    /// Use this collection with StoreKit product-loading and merchandising APIs.
+    public let productIDs: [Product.ID]
 
     /// Creates and validates a catalog from one auto-renewable subscription group.
     ///
@@ -26,8 +36,10 @@ where Entitlement: Hashable & Sendable {
             "An auto-renewable subscription group must declare at least one product."
         )
 
-        var entitlementsByProductID: [Product.ID: Entitlement] = [:]
-        entitlementsByProductID.reserveCapacity(subscriptions.count)
+        var entriesByProductID: [Product.ID: Entry] = [:]
+        entriesByProductID.reserveCapacity(subscriptions.count)
+        var productIDs: [Product.ID] = []
+        productIDs.reserveCapacity(subscriptions.count)
 
         for subscription in subscriptions {
             let productID = subscription.id.rawValue
@@ -37,16 +49,27 @@ where Entitlement: Hashable & Sendable {
                 "A subscription product identifier must not be empty."
             )
             precondition(
-                entitlementsByProductID[productID] == nil,
+                entriesByProductID[productID] == nil,
                 "A subscription product identifier must not be declared more than once: \(productID)"
             )
 
-            entitlementsByProductID[productID] = subscription.entitlement
+            entriesByProductID[productID] = Entry(
+                entitlement: subscription.entitlement
+            )
+            productIDs.append(productID)
         }
 
         subscriptionGroupID = Group.id
+        self.productIDs = productIDs
         declaringGroupTypeID = ObjectIdentifier(groupType)
-        self.entitlementsByProductID = entitlementsByProductID
+        self.entriesByProductID = entriesByProductID
+    }
+
+    /// Returns the app entitlement declared for a product identifier.
+    ///
+    /// The result is `nil` when the identifier isn't declared by this catalog.
+    public func entitlement(for productID: Product.ID) -> Entitlement? {
+        entriesByProductID[productID]?.entitlement
     }
 
     package func classification(
@@ -62,13 +85,13 @@ where Entitlement: Hashable & Sendable {
     }
 
     package func contains(productID: Product.ID) -> Bool {
-        entitlementsByProductID[productID] != nil
+        entriesByProductID[productID] != nil
     }
 
     private func validatedTransaction(
         _ transaction: StoreTransactionSnapshot
     ) throws(AutoRenewableSubscriptionCatalogError) -> ValidatedTransaction {
-        if let entitlement = entitlementsByProductID[transaction.productID] {
+        if let entry = entriesByProductID[transaction.productID] {
             guard transaction.productType == .autoRenewable else {
                 throw AutoRenewableSubscriptionCatalogError.productTypeMismatch(
                     productID: transaction.productID,
@@ -84,7 +107,7 @@ where Entitlement: Hashable & Sendable {
                 )
             }
 
-            return .declared(entitlement)
+            return .declared(entry.entitlement)
         }
 
         guard transaction.subscriptionGroupID == subscriptionGroupID.rawValue else {

@@ -66,7 +66,7 @@ Pass the same declared Product IDs to StoreKit's subscription view:
 import StoreKit
 
 SubscriptionStoreView(
-    productIDs: Plans.subscriptions.map(\.id.rawValue)
+    productIDs: subscriptionCatalog.productIDs
 )
 ```
 
@@ -76,6 +76,54 @@ non-upgraded unrecognized product remains in the raw projection, grants no
 typed access by default, and doesn't by itself make entitlement readiness fail.
 See <doc:UnderstandingTransactionHandling> to choose another policy with
 ``UnrecognizedSubscriptionDelegate``.
+
+## Load product information
+
+The catalog exposes declared Product IDs in declaration order. Load their
+current StoreKit metadata for custom merchandising:
+
+```swift
+import StoreKit
+
+let loadedProducts = try await Product.products(
+    for: subscriptionCatalog.productIDs
+)
+let productsByID = Dictionary(
+    uniqueKeysWithValues: loadedProducts.map { ($0.id, $0) }
+)
+
+for productID in subscriptionCatalog.productIDs {
+    guard
+        let product = productsByID[productID],
+        let entitlement = subscriptionCatalog.entitlement(for: productID),
+        let subscription = product.subscription
+    else {
+        continue
+    }
+
+    let displayName = product.displayName
+    let displayPrice = product.displayPrice
+    let groupLevel = subscription.groupLevel
+    let period = subscription.subscriptionPeriod
+}
+```
+
+``AutoRenewableSubscriptionCatalog/entitlement(for:)`` joins a StoreKit
+`Product` to the app entitlement declared by this binary.
+`Product.SubscriptionInfo` supplies the current group level, period, group
+metadata, and offers. It is product metadata rather than part of the verified
+``StoreTransactionSnapshot``.
+
+Query current renewal status separately with the same catalog identity:
+
+```swift
+let statuses = try await Product.SubscriptionInfo.status(
+    for: subscriptionCatalog.subscriptionGroupID.rawValue
+)
+```
+
+Use these statuses for renewal and billing presentation. Keep
+``TransactionStore/activeEntitlements`` as the access source of truth.
 
 ## Read access without blocking the UI
 

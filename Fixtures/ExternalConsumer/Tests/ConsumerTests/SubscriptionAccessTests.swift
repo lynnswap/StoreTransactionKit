@@ -5,6 +5,25 @@ import StoreKit
 import Testing
 
 @Test
+func catalogExposesStoreKitProductLookupInputs() {
+    #expect(subscriptionCatalog.subscriptionGroupID == Plans.id)
+    #expect(
+        subscriptionProductIDs
+            == [
+                Plans.ProductID.tier1_Monthly.rawValue,
+                Plans.ProductID.tier1_Yearly.rawValue,
+                Plans.ProductID.tier2_Monthly.rawValue,
+                Plans.ProductID.tier2_Yearly.rawValue,
+            ]
+    )
+    #expect(
+        entitlement(for: Plans.ProductID.tier1_Yearly.rawValue)
+            == .tier1
+    )
+    #expect(entitlement(for: "external-consumer.unknown") == nil)
+}
+
+@Test
 @MainActor
 func tier1PurchaseAndExpirationUpdateViewModel() async throws {
     try await withTransactionStoreTestHarness(

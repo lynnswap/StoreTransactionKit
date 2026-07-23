@@ -16,10 +16,24 @@ struct AutoRenewableSubscriptionCatalogTests {
 
         #expect(countingSubscriptionsAccessCount.withLock { $0 } == 1)
         #expect(catalog.subscriptionGroupID == CountingPlans.id)
+        #expect(
+            catalog.productIDs
+                == [CountingPlans.ProductID.monthly.rawValue]
+        )
         #expect(catalog.isDeclared(by: CountingPlans.self))
         #expect(!catalog.isDeclared(by: OtherPlans.self))
         #expect(catalog.contains(productID: CountingPlans.ProductID.monthly.rawValue))
         #expect(!catalog.contains(productID: "com.example.subscription.undeclared"))
+        #expect(
+            catalog.entitlement(
+                for: CountingPlans.ProductID.monthly.rawValue
+            ) == .tier1
+        )
+        #expect(
+            catalog.entitlement(
+                for: "com.example.subscription.undeclared"
+            ) == nil
+        )
 
         let transaction = subscriptionSnapshot(
             id: 0,
@@ -36,6 +50,15 @@ struct AutoRenewableSubscriptionCatalogTests {
     @Test("monthly and yearly products classify with their declared entitlements")
     func classifiesDeclaredEntitlements() throws {
         let catalog = AutoRenewableSubscriptionCatalog(Plans.self)
+        #expect(
+            catalog.productIDs
+                == [
+                    Plans.ProductID.tier1_Monthly.rawValue,
+                    Plans.ProductID.tier1_Yearly.rawValue,
+                    Plans.ProductID.tier2_Monthly.rawValue,
+                    Plans.ProductID.tier2_Yearly.rawValue,
+                ]
+        )
         let classifications = try [
             Plans.ProductID.tier1_Monthly,
             .tier1_Yearly,
@@ -57,6 +80,25 @@ struct AutoRenewableSubscriptionCatalogTests {
                 .declared(.tier2),
                 .declared(.tier2),
             ]
+        )
+    }
+
+    @Test("optional entitlement values remain declared")
+    func optionalEntitlementRemainsDeclared() throws {
+        let catalog = AutoRenewableSubscriptionCatalog(OptionalPlans.self)
+        let productID = OptionalPlans.ProductID.monthly.rawValue
+
+        #expect(catalog.productIDs == [productID])
+        #expect(catalog.entitlement(for: productID) == .some(nil))
+        #expect(catalog.contains(productID: productID))
+        #expect(
+            try catalog.classification(
+                of: subscriptionSnapshot(
+                    id: 4,
+                    productID: productID,
+                    subscriptionGroupID: OptionalPlans.id.rawValue
+                )
+            ) == .declared(nil)
         )
     }
 
@@ -291,6 +333,20 @@ private enum OtherPlans:
 
     static var subscriptions: StoreSubscriptions {
         StoreSubscription(.monthly, entitlement: .tier2)
+    }
+}
+
+private enum OptionalPlans:
+    AutoRenewableSubscriptionGroup<SubscriptionEntitlement?>
+{
+    static let id = SubscriptionGroupID(rawValue: "optional-group")
+
+    enum ProductID: String, Hashable, Sendable {
+        case monthly = "com.example.optional.monthly"
+    }
+
+    static var subscriptions: StoreSubscriptions {
+        StoreSubscription(.monthly, entitlement: nil)
     }
 }
 
