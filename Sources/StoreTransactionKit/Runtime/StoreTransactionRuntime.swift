@@ -130,6 +130,7 @@ where Entitlement: Hashable & Sendable {
         let failures = failures
         let subscriptionStatusReadiness = subscriptionStatusReadiness
         let startupCompletion = startupCompletion
+        let startupRegistration = finiteTasks.reserve()
 
         let updatesTask = Task.detached {
             await source.runUpdates(
@@ -152,6 +153,7 @@ where Entitlement: Hashable & Sendable {
             )
         }
         let startupTask = Task.detached {
+            defer { startupRegistration.complete() }
             let reservation = await entitlements.reserve(
                 retryFailedTransactions: false
             )
@@ -194,6 +196,7 @@ where Entitlement: Hashable & Sendable {
                 startupCompletion.fail(error)
             }
         }
+        startupRegistration.attach(startupTask)
         let inserted = tasks.withLock { tasks in
             guard tasks == nil else { return false }
             tasks = RuntimeTasks(
@@ -206,7 +209,6 @@ where Entitlement: Hashable & Sendable {
         precondition(inserted, "A transaction runtime can start only once.")
         producerCancellation.insert(updatesTask)
         producerCancellation.insert(subscriptionStatusTask)
-        finiteTasks.insert(startupTask)
     }
 
     package func process(
@@ -285,8 +287,12 @@ where Entitlement: Hashable & Sendable {
         let claim = await accepted.acceptance.claimCausalResolutionIfOwner()
         await didAdmit()
         let operationReceipt = ProcessingReceipt<StoreTransactionSnapshot>()
+        let registration = finiteTasks.reserve()
         let task = Task {
-            defer { leases.work.end() }
+            defer {
+                leases.work.end()
+                registration.complete()
+            }
             do {
                 _ = try await accepted.acceptance.receipt.terminalValue()
             } catch {
@@ -342,7 +348,7 @@ where Entitlement: Hashable & Sendable {
                 )
             }
         }
-        finiteTasks.insert(task)
+        registration.attach(task)
         return try await outcome(
             receipt: operationReceipt,
             observation: observation,
@@ -361,8 +367,12 @@ where Entitlement: Hashable & Sendable {
         )
         await didAdmit()
         let operationReceipt = ProcessingReceipt<StoreTransactionSnapshot>()
+        let registration = finiteTasks.reserve()
         let task = Task {
-            defer { leases.work.end() }
+            defer {
+                leases.work.end()
+                registration.complete()
+            }
             operationReceipt.fail(
                 await directFailure(
                     observation: observation,
@@ -374,7 +384,7 @@ where Entitlement: Hashable & Sendable {
                 )
             )
         }
-        finiteTasks.insert(task)
+        registration.attach(task)
         return try await outcome(
             receipt: operationReceipt,
             observation: observation,
@@ -396,8 +406,12 @@ where Entitlement: Hashable & Sendable {
             preconditionFailure("A direct refresh lost its reporting binding.")
         }
         let operationReceipt = ProcessingReceipt<EntitlementPublication<Entitlement>>()
+        let registration = finiteTasks.reserve()
         let task = Task {
-            defer { leases.work.end() }
+            defer {
+                leases.work.end()
+                registration.complete()
+            }
             do {
                 let publication = try await refresh.receipt.terminalValue()
                 observation.succeed(binding)
@@ -415,7 +429,7 @@ where Entitlement: Hashable & Sendable {
                 )
             }
         }
-        finiteTasks.insert(task)
+        registration.attach(task)
         return try await outcome(
             receipt: operationReceipt,
             observation: observation,
@@ -432,8 +446,12 @@ where Entitlement: Hashable & Sendable {
             to: DirectOperationReportingAuthority()
         )
         let operationReceipt = ProcessingReceipt<[StoreTransactionSnapshot]>()
+        let registration = finiteTasks.reserve()
         let task = Task {
-            defer { leases.work.end() }
+            defer {
+                leases.work.end()
+                registration.complete()
+            }
             do {
                 let snapshots = try await source.history(productID)
                     .sorted(by: Self.historyOrder)
@@ -452,7 +470,7 @@ where Entitlement: Hashable & Sendable {
                 )
             }
         }
-        finiteTasks.insert(task)
+        registration.attach(task)
         return try await outcome(
             receipt: operationReceipt,
             observation: observation,
@@ -474,8 +492,12 @@ where Entitlement: Hashable & Sendable {
             preconditionFailure("A direct restore lost its reporting binding.")
         }
         let operationReceipt = ProcessingReceipt<EntitlementPublication<Entitlement>>()
+        let registration = finiteTasks.reserve()
         let task = Task {
-            defer { leases.work.end() }
+            defer {
+                leases.work.end()
+                registration.complete()
+            }
             do {
                 let publication = try await restore.receipt.terminalValue()
                 observation.succeed(binding)
@@ -510,7 +532,7 @@ where Entitlement: Hashable & Sendable {
                 )
             }
         }
-        finiteTasks.insert(task)
+        registration.attach(task)
         return try await outcome(
             receipt: operationReceipt,
             observation: observation,
