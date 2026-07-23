@@ -113,6 +113,18 @@ For billing retry, grace period, and renewal presentation, use
 `Product.SubscriptionInfo.Status`; do not infer subscription status only from
 snapshot dates.
 
+## Complete history queries
+
+``TransactionStore/history(for:)`` is an all-or-nothing audit query. Its result
+represents the complete verified history for the requested Product ID, so an
+unverified revision causes the operation to throw instead of silently returning
+an incomplete history as if it were complete.
+
+Current entitlements serve a different, continuity-oriented purpose: their
+verified remainder can publish while omitted verification failures are reported
+through the background path. History accepts a raw `Product.ID` intentionally so
+an app can also inspect products outside the subscription catalog.
+
 ## Failure ownership
 
 An admitted physical failure has one delivery owner. While a direct caller

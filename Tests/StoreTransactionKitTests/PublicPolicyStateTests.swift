@@ -1,3 +1,4 @@
+import Foundation
 import StoreKit
 import Testing
 @testable import StoreTransactionKit
@@ -82,10 +83,75 @@ struct PublicPolicyStateTests {
         #expect(productID == "consumable.product")
         #expect(productType == Product.ProductType.consumable)
     }
+
+    @Test("store transaction errors provide localized descriptions")
+    func localizedStoreTransactionErrors() {
+        let transaction = makeSnapshot(
+            id: 42,
+            productID: "localized.product"
+        )
+        let underlyingDescription = "The entitlement query was unavailable."
+        let unhandled = StoreTransactionError.unhandledTransaction(
+            productID: "unhandled.product",
+            productType: .consumable
+        )
+        let reentrant = StoreTransactionError.reentrantOperation(
+            operation: .history
+        )
+        let unavailable = StoreTransactionError.operationUnavailableInOverride(
+            operation: .restorePurchases
+        )
+        let refreshFailed = StoreTransactionError.entitlementRefreshFailed(
+            after: .finishedTransaction(transaction),
+            underlyingError: LocalizedMarkerError(
+                description: underlyingDescription
+            )
+        )
+        let errors: [StoreTransactionError] = [
+            .closing,
+            .closed,
+            .unknownPurchaseResult,
+            unhandled,
+            reentrant,
+            unavailable,
+            refreshFailed,
+        ]
+
+        for error in errors {
+            let localizedError: any LocalizedError = error
+            #expect(localizedError.errorDescription?.isEmpty == false)
+        }
+
+        #expect(unhandled.errorDescription?.contains("unhandled.product") == true)
+        #expect(
+            unhandled.errorDescription?
+                .contains(Product.ProductType.consumable.rawValue) == true
+        )
+        #expect(reentrant.errorDescription?.contains("history") == true)
+        #expect(
+            unavailable.errorDescription?.contains("purchase restoration") == true
+        )
+        #expect(refreshFailed.errorDescription?.contains("42") == true)
+        #expect(
+            refreshFailed.errorDescription?.contains("localized.product") == true
+        )
+        #expect(
+            refreshFailed.errorDescription?.contains(underlyingDescription) == true
+        )
+        #expect(refreshFailed.recoverySuggestion?.isEmpty == false)
+    }
 }
 
 private struct MarkerError: Error, Sendable, Equatable {
     let value: Int
+}
+
+private struct LocalizedMarkerError: LocalizedError, Sendable {
+    let description: String
+
+    var errorDescription: String? {
+        description
+    }
 }
 
 private final class DefaultDelegate: TransactionStoreDelegate {}

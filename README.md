@@ -58,7 +58,9 @@ let subscriptionCatalog = AutoRenewableSubscriptionCatalog(Plans.self)
 
 Use the subscription group ID and Product IDs exactly as configured in
 [App Store Connect][subscription-setup]. Monthly and yearly subscriptions can
-grant the same app entitlement.
+grant the same app entitlement. App Store Connect level 1 is the highest
+service level. Here, each tier identifies the exact active plan; the app decides
+which features that plan includes.
 
 Create one store at the app's process-lifetime composition root:
 
@@ -89,8 +91,8 @@ struct ExampleApp: App {
 }
 ```
 
-Read the store directly and gate only the paid feature. Entitlement
-availability does not need to block the rest of the UI:
+Read the store directly and derive feature access from the exact active plan.
+Entitlement availability does not need to block the rest of the UI:
 
 ```swift
 import StoreKit
@@ -100,6 +102,11 @@ import SwiftUI
 struct ContentView: View {
     @Environment(TransactionStore<SubscriptionEntitlement>.self) private var store
     @State private var isShowingPaywall = false
+
+    private var canUsePremiumFeatures: Bool {
+        store.isEntitled(to: .tier1)
+            || store.isEntitled(to: .tier2)
+    }
 
     private var canExportPDF: Bool {
         store.isEntitled(to: .tier1)
@@ -114,6 +121,11 @@ struct ContentView: View {
             }
 
             Section {
+                NavigationLink("Premium templates") {
+                    PremiumTemplatesView()
+                }
+                .disabled(!canUsePremiumFeatures)
+
                 Button("Export as PDF") {
                     exportPDF()
                 }
@@ -268,13 +280,19 @@ func subscriptionUpdatesViewModel() async throws {
         )
 
         #expect(viewModel.canExportPDF)
+
+        try await harness.expireActiveSubscription()
+
+        #expect(!viewModel.canExportPDF)
     }
 }
 ```
 
 `purchase(_:,in:)` returns after the resulting entitlement publication, so the
-test needs no timing guess. Inject `TransactionStoreTestClock` into the app
-component that owns a delay or deadline.
+test needs no timing guess. `expireActiveSubscription()` returns after publishing
+a ready empty entitlement set; it does not simulate renewal or billing time.
+Inject `TransactionStoreTestClock` into the app component that owns a delay or
+deadline.
 
 Add both `StoreTransactionKit` and `StoreTransactionKitTesting` to the test
 target. Keep only `StoreTransactionKit` in the production target.
