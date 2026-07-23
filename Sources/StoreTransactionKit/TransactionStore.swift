@@ -284,10 +284,9 @@ where Entitlement: Hashable & Sendable {
         )
     }
 
-    @discardableResult
     package func processSyntheticDelivery(
         _ delivery: StoreTransactionDelivery
-    ) async throws -> StoreTransactionSnapshot {
+    ) async throws -> StorePurchaseOutcome {
         try rejectReentrancy(operation: .processPurchase)
         guard case .syntheticRuntime(let runtime, let lifecycle, _) = backend else {
             preconditionFailure(
@@ -295,11 +294,7 @@ where Entitlement: Hashable & Sendable {
             )
         }
         let leases = try lifecycle.beginOperation()
-        let outcome = try await runtime.process(delivery, leases: leases)
-        guard case .completed(let snapshot) = outcome else {
-            preconditionFailure("A synthetic delivery must complete a transaction.")
-        }
-        return snapshot
+        return try await runtime.process(delivery, leases: leases)
     }
 
     /// Reconciles unfinished transactions and publishes current entitlements.

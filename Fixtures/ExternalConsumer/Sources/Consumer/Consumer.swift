@@ -27,6 +27,9 @@ public enum Plans: AutoRenewableSubscriptionGroup<SubscriptionEntitlement> {
 
 public let subscriptionCatalog = AutoRenewableSubscriptionCatalog(Plans.self)
 
+public let legacySubscriptionProductID =
+    "external-consumer.subscription.legacy"
+
 @MainActor
 public final class NotesViewModel {
     private let store: TransactionStore<SubscriptionEntitlement>
@@ -56,14 +59,36 @@ public actor AppTransactionDelegate: TransactionStoreDelegate {
     }
 }
 
+public actor AppUnrecognizedSubscriptionDelegate:
+    UnrecognizedSubscriptionDelegate
+{
+    public typealias Entitlement = SubscriptionEntitlement
+
+    public init() {}
+
+    public func decidePolicy(
+        forUnrecognizedSubscription transaction: StoreTransactionSnapshot
+    ) async throws -> UnrecognizedSubscriptionPolicy<SubscriptionEntitlement> {
+        if transaction.productID == legacySubscriptionProductID {
+            .treatAs(.tier1)
+        } else {
+            .leaveUnfinished
+        }
+    }
+}
+
 @main
 @MainActor
 struct Consumer {
     static func main() async throws {
         let delegate = AppTransactionDelegate()
+        let unrecognizedSubscriptionDelegate =
+            AppUnrecognizedSubscriptionDelegate()
         let store = TransactionStore(
             subscriptionCatalog: subscriptionCatalog,
-            delegate: delegate
+            delegate: delegate,
+            unrecognizedSubscriptionDelegate:
+                unrecognizedSubscriptionDelegate
         )
         let viewModel = NotesViewModel(store: store)
         print("Can export PDF: \(viewModel.canExportPDF)")

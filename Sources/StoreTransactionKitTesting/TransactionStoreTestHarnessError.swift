@@ -24,6 +24,15 @@ public enum TransactionStoreTestHarnessError:
         subscriptionGroupID: SubscriptionGroupID
     )
 
+    /// The supplied product is already declared by the catalog's subscription group.
+    case declaredProduct(
+        productID: String,
+        subscriptionGroupID: SubscriptionGroupID
+    )
+
+    /// The supplied value doesn't exactly match a snapshot registered by this harness.
+    case unregisteredTransaction(transactionID: UInt64)
+
     /// The synthetic store doesn't provide the requested live StoreKit operation.
     case operationUnavailable(operation: StoreTransactionOperation)
 
@@ -38,6 +47,12 @@ public enum TransactionStoreTestHarnessError:
 
         case .undeclaredProduct(let productID, let subscriptionGroupID):
             "Product \(productID) is not declared by subscription group \(subscriptionGroupID.rawValue)."
+
+        case .declaredProduct(let productID, let subscriptionGroupID):
+            "Product \(productID) is already declared by subscription group \(subscriptionGroupID.rawValue)."
+
+        case .unregisteredTransaction(let transactionID):
+            "Transaction \(transactionID) does not exactly match a snapshot registered by this test harness."
 
         case .operationUnavailable(let operation):
             "The synthetic transaction store does not provide \(operation.description)."

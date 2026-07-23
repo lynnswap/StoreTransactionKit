@@ -382,15 +382,52 @@ struct RuntimeOwnerTests {
             #expect(error.operation == .history)
         }
 
-        let completed = try await store.processSyntheticDelivery(
+        let outcome = try await store.processSyntheticDelivery(
             .synthetic(snapshot: snapshot) {
                 await current.replace(with: [snapshot])
             }
         )
 
-        #expect(completed == snapshot)
+        #expect(outcome == .completed(snapshot))
         #expect(store.entitlements?.transactions == [snapshot])
         #expect(store.activeEntitlements == [.tier1])
+        try await store.close()
+    }
+
+    @MainActor
+    @Test("synthetic delivery returns an unfinished semantic outcome")
+    func syntheticDeliveryReturnsUnfinishedOutcome() async throws {
+        let snapshot = makeSnapshot(
+            id: 25,
+            productID: "test.subscription.unrecognized",
+            productType: .autoRenewable,
+            subscriptionGroupID: TestPlans.id.rawValue,
+            jws: "synthetic-unrecognized-25"
+        )
+        let current = EntitlementValueSource([snapshot])
+        let syntheticSource = SyntheticStoreTransactionSource(
+            currentEntitlements: { await current.read() }
+        )
+        let finishes = TestSignal()
+        let store = TransactionStore(
+            subscriptionCatalog: testSubscriptionCatalog,
+            syntheticSource: syntheticSource,
+            unavailableOperationError: {
+                SyntheticOperationError(operation: $0)
+            }
+        )
+        try await store.waitForInitialReadiness()
+
+        let outcome = try await store.processSyntheticDelivery(
+            .synthetic(snapshot: snapshot) {
+                await finishes.send()
+            }
+        )
+
+        #expect(outcome == .leftUnfinished(snapshot))
+        #expect(await finishes.value() == 0)
+        #expect(store.entitlements?.transactions == [snapshot])
+        #expect(store.activeEntitlements == [])
         try await store.close()
     }
 
