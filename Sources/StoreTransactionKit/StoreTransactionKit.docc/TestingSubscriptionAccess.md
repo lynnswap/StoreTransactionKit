@@ -64,3 +64,48 @@ The harness transaction pipeline has no delay or retry timer. Inject
 ViewModel or delegate, and advance it explicitly. A harness purchase receipt
 still marks entitlement publication; clock advancement alone does not imply
 that transaction work is complete.
+
+```swift
+final class DelayedTransactionDelegate: TransactionStoreDelegate {
+    private let clock: any Clock<Duration>
+
+    init(clock: any Clock<Duration>) {
+        self.clock = clock
+    }
+
+    func decidePolicy(
+        for transaction: StoreTransactionSnapshot
+    ) async throws -> StoreTransactionHandlingPolicy {
+        try await clock.sleep(for: .seconds(30))
+        return .finish
+    }
+}
+
+let clock = TransactionStoreTestClock()
+let delegate = DelayedTransactionDelegate(clock: clock)
+
+try await withTransactionStoreTestHarness(
+    subscriptionCatalog: subscriptionCatalog,
+    delegate: delegate
+) { harness in
+    let viewModel = NotesViewModel(store: harness.store)
+    let purchase = Task { @MainActor in
+        try await harness.purchase(
+            .tier1_Monthly,
+            in: Plans.self
+        )
+    }
+
+    try await clock.waitUntilPendingSleepCount(reaches: 1)
+    #expect(!viewModel.canExportPDF)
+
+    clock.advance(by: .seconds(30))
+    try await purchase.value
+
+    #expect(viewModel.canExportPDF)
+}
+```
+
+`waitUntilPendingSleepCount(reaches:)` is a continuation-backed registration
+barrier, so the test needs neither a fixed delay nor guessed `Task.yield()`
+counts.
