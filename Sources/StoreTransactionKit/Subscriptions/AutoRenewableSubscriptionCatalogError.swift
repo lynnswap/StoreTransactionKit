@@ -40,3 +40,7 @@ public enum AutoRenewableSubscriptionCatalogError: LocalizedError, Sendable {
         }
     }
 }
+
+package struct StoreTransactionCatalogFailure: Error, Sendable {
+    package let error: AutoRenewableSubscriptionCatalogError
+}

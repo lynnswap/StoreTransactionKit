@@ -62,6 +62,31 @@ struct DirectOperationReportingTests {
         #expect(owner.fail(ownerBinding, report: makeReport(id: 3)) == nil)
     }
 
+    @Test("merged physical owners select one background report")
+    func mergedAuthoritiesReportOnce() throws {
+        let processAuthority = DirectOperationReportingAuthority()
+        let refreshAuthority = DirectOperationReportingAuthority()
+        let process = DirectOperationObservation()
+        let refresh = DirectOperationObservation()
+        let processBinding = process.bind(to: processAuthority)
+        let refreshBinding = refresh.bind(to: refreshAuthority)
+        processAuthority.merge(into: refreshAuthority)
+
+        #expect(process.abandon() == nil)
+        #expect(refresh.abandon() == nil)
+        let claimed = process.fail(
+            processBinding,
+            report: makeReport(id: 4)
+        )
+        let duplicate = refresh.fail(
+            refreshBinding,
+            report: makeReport(id: 5)
+        )
+
+        #expect(claimed?.transactionID == 4)
+        #expect(duplicate == nil)
+    }
+
     private func makeReport(id: UInt64) -> StoreTransactionBackgroundFailure {
         StoreTransactionBackgroundFailure(
             source: .abandonedDirectOperation(.refreshEntitlements),

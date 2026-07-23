@@ -43,7 +43,7 @@ where Entitlement: Hashable & Sendable {
 
     package func activeEntitlements(
         in entitlements: StoreEntitlements
-    ) throws -> Set<Entitlement> {
+    ) throws(AutoRenewableSubscriptionCatalogError) -> Set<Entitlement> {
         var activeEntitlements: Set<Entitlement> = []
 
         for transaction in entitlements.transactions {
@@ -63,7 +63,9 @@ where Entitlement: Hashable & Sendable {
 
     package func classification(
         of transaction: StoreTransactionSnapshot
-    ) throws -> AutoRenewableSubscriptionClassification {
+    ) throws(AutoRenewableSubscriptionCatalogError)
+        -> AutoRenewableSubscriptionClassification
+    {
         switch try validatedTransaction(transaction) {
         case .declared, .retiredUpgraded:
             .managed
@@ -83,7 +85,7 @@ where Entitlement: Hashable & Sendable {
 
     private func validatedTransaction(
         _ transaction: StoreTransactionSnapshot
-    ) throws -> ValidatedTransaction {
+    ) throws(AutoRenewableSubscriptionCatalogError) -> ValidatedTransaction {
         if let entitlement = entitlementsByProductID[transaction.productID] {
             guard transaction.productType == .autoRenewable else {
                 throw AutoRenewableSubscriptionCatalogError.productTypeMismatch(

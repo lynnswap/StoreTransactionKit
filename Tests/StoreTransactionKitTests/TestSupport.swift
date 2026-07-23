@@ -115,41 +115,18 @@ actor UInt64Recorder {
     }
 }
 
-final class SessionHolder: Sendable {
-    private let storage = Mutex<StoreTransactionSession?>(nil)
+final class TransactionStoreHolder<Entitlement>: Sendable
+where Entitlement: Hashable & Sendable {
+    private let storage = Mutex<TransactionStore<Entitlement>?>(nil)
 
-    func set(_ session: StoreTransactionSession) {
-        storage.withLock { value in
-            precondition(value == nil)
-            value = session
-        }
-    }
-
-    func get() -> StoreTransactionSession {
-        storage.withLock { value in
-            guard let value else {
-                preconditionFailure("SessionHolder was read before initialization.")
-            }
-            return value
-        }
-    }
-}
-
-final class TransactionStoreHolder<EntitlementID>: Sendable
-where
-    EntitlementID: RawRepresentable & Hashable & Sendable,
-    EntitlementID.RawValue == String
-{
-    private let storage = Mutex<TransactionStore<EntitlementID>?>(nil)
-
-    func set(_ store: TransactionStore<EntitlementID>) {
+    func set(_ store: TransactionStore<Entitlement>) {
         storage.withLock { value in
             precondition(value == nil)
             value = store
         }
     }
 
-    func get() -> TransactionStore<EntitlementID> {
+    func get() -> TransactionStore<Entitlement> {
         storage.withLock { value in
             guard let value else {
                 preconditionFailure("TransactionStoreHolder was read before initialization.")
@@ -167,6 +144,7 @@ actor ControlledEntitlementQuery {
 
     private var requests: [Request] = []
     private let started = TestSignal()
+    private let cancelled = TestSignal()
 
     func next() async throws -> [StoreTransactionSnapshot] {
         try Task.checkCancellation()
@@ -183,6 +161,10 @@ actor ControlledEntitlementQuery {
 
     func waitForRequest(_ count: Int) async throws {
         try await started.wait(for: count)
+    }
+
+    func waitForCancellation(_ count: Int = 1) async throws {
+        try await cancelled.wait(for: count)
     }
 
     func succeed(_ snapshots: [StoreTransactionSnapshot]) {
@@ -202,6 +184,7 @@ actor ControlledEntitlementQuery {
         requests.remove(at: index).continuation.resume(
             throwing: CancellationError()
         )
+        Task { await cancelled.send() }
     }
 }
 
@@ -241,6 +224,7 @@ func makeSnapshot(
     id: UInt64,
     productID: String = "product",
     productType: Product.ProductType = .consumable,
+    subscriptionGroupID: String? = nil,
     purchaseDate: Date? = nil,
     signedDate: Date? = nil,
     jws: String? = nil,
@@ -252,7 +236,7 @@ func makeSnapshot(
         id: id,
         originalID: id,
         productID: productID,
-        subscriptionGroupID: nil,
+        subscriptionGroupID: subscriptionGroupID,
         productType: productType,
         environment: .xcode,
         offer: nil,
@@ -288,6 +272,46 @@ func makeEnvelope(
 }
 
 struct TestFailure: Error, Sendable, Equatable {}
+
+enum TestEntitlement: Hashable, Sendable {
+    case tier1
+    case tier2
+}
+
+enum TestPlans: AutoRenewableSubscriptionGroup<TestEntitlement> {
+    static let id = SubscriptionGroupID(rawValue: "test.subscription.group")
+
+    enum ProductID: String, Hashable, Sendable {
+        case tier1Monthly = "test.subscription.tier1.monthly"
+        case tier1Yearly = "test.subscription.tier1.yearly"
+        case tier2Monthly = "test.subscription.tier2.monthly"
+    }
+
+    static var subscriptions: StoreSubscriptions {
+        StoreSubscription(.tier1Monthly, entitlement: .tier1)
+        StoreSubscription(.tier1Yearly, entitlement: .tier1)
+        StoreSubscription(.tier2Monthly, entitlement: .tier2)
+    }
+}
+
+let testSubscriptionCatalog: AutoRenewableSubscriptionCatalog<TestEntitlement> =
+    AutoRenewableSubscriptionCatalog(TestPlans.self)
+
+func makeSubscriptionSnapshot(
+    id: UInt64,
+    productID: TestPlans.ProductID,
+    isUpgraded: Bool = false,
+    revision: String? = nil
+) -> StoreTransactionSnapshot {
+    makeSnapshot(
+        id: id,
+        productID: productID.rawValue,
+        productType: .autoRenewable,
+        subscriptionGroupID: TestPlans.id.rawValue,
+        jws: revision,
+        isUpgraded: isUpgraded
+    )
+}
 
 struct TestSourceFixture: Sendable {
     let source: StoreTransactionSource
@@ -332,13 +356,19 @@ struct TestSourceFixture: Sendable {
         self.subscriptionStatusTermination = subscriptionStatusTermination
         self.entitlementQueryCount = entitlementQueryCount
         self.source = StoreTransactionSource(
-            runUpdates: { consume in
-                for await delivery in updatePair.stream {
+            runUpdates: { beginIteration, consume in
+                var iterator = updatePair.stream.makeAsyncIterator()
+                while let lease = beginIteration() {
+                    defer { lease.end() }
+                    guard let delivery = await iterator.next() else { return }
                     await consume(delivery)
                 }
             },
-            runSubscriptionStatusUpdates: { consume in
-                for await _ in subscriptionStatusPair.stream {
+            runSubscriptionStatusUpdates: { beginIteration, consume in
+                var iterator = subscriptionStatusPair.stream.makeAsyncIterator()
+                while let lease = beginIteration() {
+                    defer { lease.end() }
+                    guard await iterator.next() != nil else { return }
                     await subscriptionStatusDeliveryCount.send()
                     await consume()
                 }

@@ -14,12 +14,19 @@ package final class DirectOperationReportingAuthority: Sendable {
         var claimed = false
     }
 
-    private let state = Mutex(State())
+    private final class Node: @unchecked Sendable {
+        var parent: Node?
+        let state = Mutex(State())
+    }
+
+    private static let graph = Mutex(())
+    private let node = Node()
 
     package init() {}
 
     fileprivate func attach(abandoned: Bool) -> UUID {
-        state.withLock { state in
+        withState { state in
+            precondition(!state.claimed)
             let id = UUID()
             state.participants[id] = abandoned ? .abandoned : .attached
             return id
@@ -27,7 +34,7 @@ package final class DirectOperationReportingAuthority: Sendable {
     }
 
     fileprivate func succeed(participant id: UUID) {
-        state.withLock { state in
+        withState { state in
             _ = state.participants.removeValue(forKey: id)
         }
     }
@@ -36,7 +43,7 @@ package final class DirectOperationReportingAuthority: Sendable {
         participant id: UUID,
         report: StoreTransactionBackgroundFailure?
     ) -> StoreTransactionBackgroundFailure? {
-        state.withLock { state in
+        withState { state in
             guard state.participants[id] != nil else { return nil }
             if state.report == nil {
                 state.report = report
@@ -48,7 +55,7 @@ package final class DirectOperationReportingAuthority: Sendable {
     fileprivate func abandon(
         participant id: UUID
     ) -> StoreTransactionBackgroundFailure? {
-        state.withLock { state in
+        withState { state in
             guard state.participants[id] != nil else { return nil }
             state.participants[id] = .abandoned
             return claimReportIfAbandoned(state: &state)
@@ -56,12 +63,80 @@ package final class DirectOperationReportingAuthority: Sendable {
     }
 
     fileprivate func deliver(participant id: UUID) {
-        state.withLock { state in
+        withState { state in
             guard state.participants.removeValue(forKey: id) != nil else {
                 return
             }
             state.delivered = true
         }
+    }
+
+    package func failWithoutParticipant(
+        report: StoreTransactionBackgroundFailure
+    ) -> StoreTransactionBackgroundFailure? {
+        withState { state in
+            if state.report == nil {
+                state.report = report
+            }
+            return claimReportIfAbandoned(state: &state)
+        }
+    }
+
+    package func record(
+        report: StoreTransactionBackgroundFailure
+    ) {
+        withState { state in
+            if state.report == nil {
+                state.report = report
+            }
+        }
+    }
+
+    package func merge(
+        into authority: DirectOperationReportingAuthority
+    ) {
+        Self.graph.withLock { _ in
+            let source = root(of: node)
+            let target = root(of: authority.node)
+            guard source !== target else { return }
+
+            let sourceState = source.state.withLock { $0 }
+            target.state.withLock { targetState in
+                precondition(
+                    !sourceState.claimed
+                        && !sourceState.delivered
+                        && !targetState.claimed
+                        && !targetState.delivered
+                )
+                precondition(
+                    sourceState.report == nil || targetState.report == nil
+                )
+                for (id, participant) in sourceState.participants {
+                    precondition(targetState.participants[id] == nil)
+                    targetState.participants[id] = participant
+                }
+                if targetState.report == nil {
+                    targetState.report = sourceState.report
+                }
+            }
+            source.parent = target
+        }
+    }
+
+    private func withState<Result: Sendable>(
+        _ body: (inout sending State) -> sending Result
+    ) -> Result {
+        Self.graph.withLock { _ in
+            root(of: node).state.withLock(body)
+        }
+    }
+
+    private func root(of node: Node) -> Node {
+        var node = node
+        while let parent = node.parent {
+            node = parent
+        }
+        return node
     }
 
     private func claimReportIfAbandoned(

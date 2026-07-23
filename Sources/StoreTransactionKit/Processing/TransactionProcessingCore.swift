@@ -1,5 +1,38 @@
 import Foundation
 
+package struct TransactionCausalResolutionClaim<Value: Sendable>: Sendable {
+    package let value: Value
+    package let reportingAuthority: DirectOperationReportingAuthority
+
+    private let receipt: ProcessingReceipt<Value>
+    private let finishSuccess: @Sendable () async -> Void
+    private let finishFailure: @Sendable () async -> Void
+
+    fileprivate init(
+        value: Value,
+        reportingAuthority: DirectOperationReportingAuthority,
+        receipt: ProcessingReceipt<Value>,
+        finishSuccess: @escaping @Sendable () async -> Void,
+        finishFailure: @escaping @Sendable () async -> Void
+    ) {
+        self.value = value
+        self.reportingAuthority = reportingAuthority
+        self.receipt = receipt
+        self.finishSuccess = finishSuccess
+        self.finishFailure = finishFailure
+    }
+
+    package func succeed() async {
+        await finishSuccess()
+        receipt.succeed(value)
+    }
+
+    package func fail(_ error: any Error) async {
+        await finishFailure()
+        receipt.fail(error)
+    }
+}
+
 package struct ProcessingAcceptance<Value: Sendable>: Sendable {
     package enum Role: Equatable, Sendable {
         case owner
@@ -8,23 +41,66 @@ package struct ProcessingAcceptance<Value: Sendable>: Sendable {
         case completedObserver
     }
 
+    /// Completes after the handling policy and `finish()` complete.
     package let receipt: ProcessingReceipt<Value>
+
+    /// Completes after the exact revision's causal entitlement publication.
+    package let causalReceipt: ProcessingReceipt<Value>
     package let role: Role
     package let reportingAuthority: DirectOperationReportingAuthority
+    package let directBinding: DirectOperationObservation.Binding?
+
+    private let claimCausalResolution: @Sendable () async -> TransactionCausalResolutionClaim<Value>?
+
+    fileprivate init(
+        receipt: ProcessingReceipt<Value>,
+        causalReceipt: ProcessingReceipt<Value>,
+        role: Role,
+        reportingAuthority: DirectOperationReportingAuthority,
+        directBinding: DirectOperationObservation.Binding?,
+        claimCausalResolution:
+            @escaping @Sendable () async
+            -> TransactionCausalResolutionClaim<Value>?
+    ) {
+        self.receipt = receipt
+        self.causalReceipt = causalReceipt
+        self.role = role
+        self.reportingAuthority = reportingAuthority
+        self.directBinding = directBinding
+        self.claimCausalResolution = claimCausalResolution
+    }
+
+    package func claimCausalResolutionIfOwner() async
+        -> TransactionCausalResolutionClaim<Value>?
+    {
+        await claimCausalResolution()
+    }
 }
 
 package actor TransactionProcessingCore<Value: Sendable> {
+    private enum AttemptPhase: Sendable {
+        case deciding
+        case decisionFailed
+        case finished
+    }
+
     private struct Attempt: Sendable {
-        let receipt: ProcessingReceipt<Value>
+        let id: UUID
+        let value: Value
+        let decisionReceipt: ProcessingReceipt<Value>
+        let causalReceipt: ProcessingReceipt<Value>
         let reportingAuthority: DirectOperationReportingAuthority
+        var causalResolutionClaimed: Bool
+        var phase: AttemptPhase
     }
 
     private struct QueuedOperation: Sendable {
         let envelope: ProcessingEnvelope<Value>
-        let attempt: Attempt
+        let attemptID: UUID
     }
 
     private let sessionID: UUID
+    private let lifetime: TransactionStoreLifecycle?
     private let handle: @Sendable (Value) async throws -> Void
     private var queue: [QueuedOperation] = []
     private var inFlight: [Data: Attempt] = [:]
@@ -33,59 +109,94 @@ package actor TransactionProcessingCore<Value: Sendable> {
     private var worker: Task<Void, Never>?
     private var acceptsInput = true
     private var initialAttemptCompleted = false
+    private nonisolated let workerCancellation = TaskCancellationBag()
 
     package init(
         sessionID: UUID = UUID(),
+        lifetime: TransactionStoreLifecycle? = nil,
         handle: @escaping @Sendable (Value) async throws -> Void
     ) {
         self.sessionID = sessionID
+        self.lifetime = lifetime
         self.handle = handle
     }
 
     package func accept(
-        _ envelope: ProcessingEnvelope<Value>
+        _ envelope: ProcessingEnvelope<Value>,
+        directObservation: DirectOperationObservation? = nil
     ) -> ProcessingAcceptance<Value> {
         guard acceptsInput else {
+            let error = StoreTransactionInternalError.inputClosed
             return ProcessingAcceptance(
-                receipt: .failed(StoreTransactionInternalError.inputClosed),
+                receipt: .failed(error),
+                causalReceipt: .failed(error),
                 role: .owner,
-                reportingAuthority: DirectOperationReportingAuthority()
-            )
-        }
-        if completed.contains(envelope.revision) {
-            return ProcessingAcceptance(
-                receipt: .succeeded(envelope.value),
-                role: .completedObserver,
-                reportingAuthority: DirectOperationReportingAuthority()
+                reportingAuthority: DirectOperationReportingAuthority(),
+                directBinding: nil,
+                claimCausalResolution: { nil }
             )
         }
         if let attempt = inFlight[envelope.revision] {
-            return ProcessingAcceptance(
-                receipt: attempt.receipt,
+            return acceptance(
+                revision: envelope.revision,
+                attempt: attempt,
                 role: .inFlightObserver,
-                reportingAuthority: attempt.reportingAuthority
+                directObservation: directObservation
             )
         }
         if let attempt = failed[envelope.revision] {
-            return ProcessingAcceptance(
-                receipt: attempt.receipt,
+            return acceptance(
+                revision: envelope.revision,
+                attempt: attempt,
                 role: .failedObserver,
-                reportingAuthority: attempt.reportingAuthority
+                directObservation: directObservation,
+                reportingAuthority: DirectOperationReportingAuthority()
+            )
+        }
+        if completed.state(for: envelope.revision) == .satisfied {
+            let reportingAuthority = DirectOperationReportingAuthority()
+            return ProcessingAcceptance(
+                receipt: .succeeded(envelope.value),
+                causalReceipt: .succeeded(envelope.value),
+                role: .completedObserver,
+                reportingAuthority: reportingAuthority,
+                directBinding: directObservation?.bind(
+                    to: reportingAuthority
+                ),
+                claimCausalResolution: { nil }
+            )
+        }
+        if completed.state(for: envelope.revision) == .needsRefresh {
+            let attempt = makeAttempt(
+                value: envelope.value,
+                decisionReceipt: .succeeded(envelope.value),
+                alreadyFinished: true
+            )
+            inFlight[envelope.revision] = attempt
+            return acceptance(
+                revision: envelope.revision,
+                attempt: attempt,
+                role: .completedObserver,
+                directObservation: directObservation
             )
         }
 
-        let attempt = Attempt(
-            receipt: ProcessingReceipt<Value>(),
-            reportingAuthority: DirectOperationReportingAuthority()
-        )
+        let attempt = makeAttempt(value: envelope.value)
         inFlight[envelope.revision] = attempt
-        queue.append(QueuedOperation(envelope: envelope, attempt: attempt))
-        startWorkerIfNeeded()
-        return ProcessingAcceptance(
-            receipt: attempt.receipt,
-            role: .owner,
-            reportingAuthority: attempt.reportingAuthority
+        queue.append(
+            QueuedOperation(
+                envelope: envelope,
+                attemptID: attempt.id
+            )
         )
+        let accepted = acceptance(
+            revision: envelope.revision,
+            attempt: attempt,
+            role: .owner,
+            directObservation: directObservation
+        )
+        startWorkerIfNeeded()
+        return accepted
     }
 
     package func retryFailedTransactionsInNewAttempt() -> Bool {
@@ -117,17 +228,126 @@ package actor TransactionProcessingCore<Value: Sendable> {
         failed.removeAll(keepingCapacity: false)
     }
 
+    package nonisolated func cancelSynchronously() {
+        workerCancellation.cancel()
+    }
+
+    private func makeAttempt(
+        value: Value,
+        decisionReceipt: ProcessingReceipt<Value> = ProcessingReceipt<Value>(),
+        alreadyFinished: Bool = false
+    ) -> Attempt {
+        Attempt(
+            id: UUID(),
+            value: value,
+            decisionReceipt: decisionReceipt,
+            causalReceipt: ProcessingReceipt<Value>(),
+            reportingAuthority: DirectOperationReportingAuthority(),
+            causalResolutionClaimed: false,
+            phase: alreadyFinished ? .finished : .deciding
+        )
+    }
+
+    private func acceptance(
+        revision: Data,
+        attempt: Attempt,
+        role: ProcessingAcceptance<Value>.Role,
+        directObservation: DirectOperationObservation?,
+        reportingAuthority: DirectOperationReportingAuthority? = nil
+    ) -> ProcessingAcceptance<Value> {
+        let reportingAuthority = reportingAuthority ?? attempt.reportingAuthority
+        return ProcessingAcceptance(
+            receipt: attempt.decisionReceipt,
+            causalReceipt: attempt.causalReceipt,
+            role: role,
+            reportingAuthority: reportingAuthority,
+            directBinding: directObservation?.bind(to: reportingAuthority),
+            claimCausalResolution: { [weak self] in
+                guard let self else { return nil }
+                return await self.claimCausalResolution(
+                    revision: revision,
+                    attemptID: attempt.id
+                )
+            }
+        )
+    }
+
+    private func claimCausalResolution(
+        revision: Data,
+        attemptID: UUID
+    ) -> TransactionCausalResolutionClaim<Value>? {
+        let attempt: Attempt
+        if var active = inFlight[revision], active.id == attemptID {
+            guard !active.causalResolutionClaimed else { return nil }
+            active.causalResolutionClaimed = true
+            inFlight[revision] = active
+            attempt = active
+        } else {
+            return nil
+        }
+
+        return TransactionCausalResolutionClaim(
+            value: attempt.value,
+            reportingAuthority: attempt.reportingAuthority,
+            receipt: attempt.causalReceipt,
+            finishSuccess: { [weak self] in
+                await self?.finishCausalResolution(
+                    revision: revision,
+                    attemptID: attemptID,
+                    succeeded: true
+                )
+            },
+            finishFailure: { [weak self] in
+                await self?.finishCausalResolution(
+                    revision: revision,
+                    attemptID: attemptID,
+                    succeeded: false
+                )
+            }
+        )
+    }
+
+    private func finishCausalResolution(
+        revision: Data,
+        attemptID: UUID,
+        succeeded: Bool
+    ) {
+        if let attempt = inFlight[revision], attempt.id == attemptID {
+            precondition(attempt.causalResolutionClaimed)
+            inFlight.removeValue(forKey: revision)
+            if succeeded {
+                precondition(attempt.phase == .finished)
+                completed.insert(revision, state: .satisfied)
+            } else if attempt.phase == .decisionFailed {
+                failed[revision] = attempt
+            }
+            return
+        }
+        if let attempt = failed[revision], attempt.id == attemptID {
+            precondition(attempt.causalResolutionClaimed)
+            return
+        }
+    }
+
     private func startWorkerIfNeeded() {
         guard worker == nil else { return }
-        worker = Task.detached { [weak self] in
+        let task = Task.detached { [weak self] in
             guard let self else { return }
             await self.drainQueue()
         }
+        worker = task
+        workerCancellation.insert(task)
     }
 
     private func drainQueue() async {
         while !queue.isEmpty {
             let operation = queue.removeFirst()
+            guard
+                let attempt = inFlight[operation.envelope.revision],
+                attempt.id == operation.attemptID
+            else {
+                preconditionFailure("A queued transaction lost its processing attempt.")
+            }
             do {
                 try await StoreTransactionCallbackContext.$current.withValue(
                     StoreTransactionCallbackInvocation(
@@ -139,15 +359,33 @@ package actor TransactionProcessingCore<Value: Sendable> {
                 }
                 await operation.envelope.finish()
                 completed.insert(operation.envelope.revision)
-                inFlight.removeValue(forKey: operation.envelope.revision)
-                operation.attempt.receipt.succeed(operation.envelope.value)
+                guard
+                    var finishedAttempt = inFlight[operation.envelope.revision],
+                    finishedAttempt.id == operation.attemptID
+                else {
+                    preconditionFailure(
+                        "A finished transaction lost its processing attempt."
+                    )
+                }
+                finishedAttempt.phase = .finished
+                inFlight[operation.envelope.revision] = finishedAttempt
+                attempt.decisionReceipt.succeed(operation.envelope.value)
             } catch {
-                inFlight.removeValue(forKey: operation.envelope.revision)
-                failed[operation.envelope.revision] = operation.attempt
-                operation.attempt.receipt.fail(error)
+                guard
+                    var failedAttempt = inFlight[operation.envelope.revision],
+                    failedAttempt.id == operation.attemptID
+                else {
+                    preconditionFailure(
+                        "A failed transaction lost its processing attempt."
+                    )
+                }
+                failedAttempt.phase = .decisionFailed
+                inFlight[operation.envelope.revision] = failedAttempt
+                attempt.decisionReceipt.fail(error)
             }
         }
         worker = nil
+        workerCancellation.removeAll()
     }
 
     isolated deinit {
