@@ -161,18 +161,20 @@ struct TransactionStoreTestClockTests {
         try await clock.waitUntilPendingSleepCount(reaches: 0)
     }
 
-    @Test("A negative advance is a programmer error")
-    func negativeAdvance() async {
-        await #expect(processExitsWith: .failure) {
-            TransactionStoreTestClock().advance(by: .seconds(-1))
+    #if os(macOS)
+        @Test("A negative advance is a programmer error")
+        func negativeAdvance() async {
+            await #expect(processExitsWith: .failure) {
+                TransactionStoreTestClock().advance(by: .seconds(-1))
+            }
         }
-    }
 
-    @Test("A negative pending-sleep target is a programmer error")
-    func negativePendingSleepCount() async {
-        await #expect(processExitsWith: .failure) {
-            try await TransactionStoreTestClock()
-                .waitUntilPendingSleepCount(reaches: -1)
+        @Test("A negative pending-sleep target is a programmer error")
+        func negativePendingSleepCount() async {
+            await #expect(processExitsWith: .failure) {
+                try await TransactionStoreTestClock()
+                    .waitUntilPendingSleepCount(reaches: -1)
+            }
         }
-    }
+    #endif
 }

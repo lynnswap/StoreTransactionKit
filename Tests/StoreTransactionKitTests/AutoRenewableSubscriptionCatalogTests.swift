@@ -264,33 +264,35 @@ struct AutoRenewableSubscriptionCatalogTests {
         }
     }
 
-    @Test("an empty group identifier is a construction error")
-    func emptyGroupIDFails() async {
-        await #expect(processExitsWith: .failure) {
-            _ = SubscriptionGroupID(rawValue: "")
+    #if os(macOS)
+        @Test("an empty group identifier is a construction error")
+        func emptyGroupIDFails() async {
+            await #expect(processExitsWith: .failure) {
+                _ = SubscriptionGroupID(rawValue: "")
+            }
         }
-    }
 
-    @Test("an empty subscription declaration is a construction error")
-    func emptyDeclarationFails() async {
-        await #expect(processExitsWith: .failure) {
-            _ = AutoRenewableSubscriptionCatalog(EmptyPlans.self)
+        @Test("an empty subscription declaration is a construction error")
+        func emptyDeclarationFails() async {
+            await #expect(processExitsWith: .failure) {
+                _ = AutoRenewableSubscriptionCatalog(EmptyPlans.self)
+            }
         }
-    }
 
-    @Test("an empty product identifier is a construction error")
-    func emptyProductIDFails() async {
-        await #expect(processExitsWith: .failure) {
-            _ = AutoRenewableSubscriptionCatalog(EmptyProductIDPlans.self)
+        @Test("an empty product identifier is a construction error")
+        func emptyProductIDFails() async {
+            await #expect(processExitsWith: .failure) {
+                _ = AutoRenewableSubscriptionCatalog(EmptyProductIDPlans.self)
+            }
         }
-    }
 
-    @Test("duplicate raw product identifiers are a construction error")
-    func duplicateProductIDFails() async {
-        await #expect(processExitsWith: .failure) {
-            _ = AutoRenewableSubscriptionCatalog(DuplicateProductIDPlans.self)
+        @Test("duplicate raw product identifiers are a construction error")
+        func duplicateProductIDFails() async {
+            await #expect(processExitsWith: .failure) {
+                _ = AutoRenewableSubscriptionCatalog(DuplicateProductIDPlans.self)
+            }
         }
-    }
+    #endif
 }
 
 private enum SubscriptionEntitlement: Hashable, Sendable {

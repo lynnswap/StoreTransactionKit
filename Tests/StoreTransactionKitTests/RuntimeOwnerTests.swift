@@ -477,34 +477,36 @@ struct RuntimeOwnerTests {
         replacement.release()
     }
 
-    @Test("the live lease is process-wide and releases explicitly")
-    func liveLeaseAuthority() async {
-        await #expect(processExitsWith: .failure) {
-            let first = LiveTransactionStoreLease.acquire()
-            let second = LiveTransactionStoreLease.acquire()
-            _ = (first, second)
-        }
-
-        let first = LiveTransactionStoreLease.acquire()
-        first.release()
-        let second = LiveTransactionStoreLease.acquire()
-        second.release()
-    }
-
-    @Test("live-store exclusion crosses TransactionStore generic specializations")
-    func crossGenericLiveLease() async {
-        await #expect(processExitsWith: .failure) {
-            await MainActor.run {
-                let first = TransactionStore(
-                    subscriptionCatalog: testSubscriptionCatalog
-                )
-                let second = TransactionStore(
-                    subscriptionCatalog: otherSubscriptionCatalog
-                )
+    #if os(macOS)
+        @Test("the live lease is process-wide and releases explicitly")
+        func liveLeaseAuthority() async {
+            await #expect(processExitsWith: .failure) {
+                let first = LiveTransactionStoreLease.acquire()
+                let second = LiveTransactionStoreLease.acquire()
                 _ = (first, second)
             }
+
+            let first = LiveTransactionStoreLease.acquire()
+            first.release()
+            let second = LiveTransactionStoreLease.acquire()
+            second.release()
         }
-    }
+
+        @Test("live-store exclusion crosses TransactionStore generic specializations")
+        func crossGenericLiveLease() async {
+            await #expect(processExitsWith: .failure) {
+                await MainActor.run {
+                    let first = TransactionStore(
+                        subscriptionCatalog: testSubscriptionCatalog
+                    )
+                    let second = TransactionStore(
+                        subscriptionCatalog: otherSubscriptionCatalog
+                    )
+                    _ = (first, second)
+                }
+            }
+        }
+    #endif
 }
 
 private enum OtherEntitlement: Hashable, Sendable {

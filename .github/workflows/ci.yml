@@ -154,7 +154,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO
 
   ios-tests:
-    name: Package Tests (iOS Simulator)
+    name: Package and StoreKit Tests (iOS Simulator)
     runs-on: macos-26
     timeout-minutes: 10
     env:
@@ -195,8 +195,9 @@ jobs:
       - name: Run iOS Simulator tests
         run: |
           xcodebuild test \
-            -scheme StoreTransactionKit \
+            -scheme StoreTransactionKit-Package \
             -destination "platform=iOS Simulator,id=${SIMULATOR_ID}" \
+            -parallel-testing-enabled NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
 
