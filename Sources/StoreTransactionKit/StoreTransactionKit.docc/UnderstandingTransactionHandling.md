@@ -78,9 +78,10 @@ refresh publishes a new ready snapshot.
 
 The catalog maps declared Product IDs to app entitlement values. It does not
 copy StoreKit group levels or subscription periods into the entitlement type,
-and multiple Product IDs may map to the same value. Upgraded transactions stay
-in the raw projection but grant no typed access. Products outside the managed
-group stay raw and do not enter the typed set.
+and multiple Product IDs may map to the same value. A transaction that StoreKit
+marks as upgraded grants no typed access. The raw projection otherwise mirrors
+the verified current-entitlement items StoreKit returns, including products
+outside the managed group.
 
 StoreKit excludes revoked or refunded transactions from current entitlements.
 For billing retry, grace period, and renewal presentation, use
