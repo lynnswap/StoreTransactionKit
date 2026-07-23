@@ -92,7 +92,7 @@ jobs:
             -destination 'generic/platform=macOS' \
             -derivedDataPath .build/docc-ci
 
-      - name: Build external consumer fixture
+      - name: Build and test external consumer fixture
         working-directory: Fixtures/ExternalConsumer
         run: |
           swift package resolve
@@ -101,7 +101,7 @@ jobs:
             echo "External consumer resolved an app-only dependency." >&2
             exit 1
           fi
-          swift build --build-system swiftbuild
+          swift test --build-system swiftbuild
 
   supported-platform-builds:
     name: Test Build (${{ matrix.name }})
