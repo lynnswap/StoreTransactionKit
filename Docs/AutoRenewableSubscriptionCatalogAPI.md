@@ -2,11 +2,12 @@
 
 Status: Proposed for the next beta API.
 
-This document is the source of truth for the proposal only. The public source,
-README, and symbol documentation continue to describe the currently released
-API until the implementation transaction is complete. After implementation,
-the public contracts move to symbol DocC and a consumer article, and this
-temporary design document is removed.
+This document is the source of truth for the proposal. The README presents its
+consumer-facing shape and labels it as proposed; the public source and symbol
+documentation continue to describe the currently released API until the
+implementation transaction is complete. After implementation, the public
+contracts move to symbol DocC and a consumer article, and this temporary design
+document is removed.
 
 ## Purpose
 
@@ -24,6 +25,8 @@ transaction pipeline without inventing StoreKit transactions in app code.
 
 - Scope the Product ID type to one auto-renewable subscription group.
 - Map multiple billing durations at one access level to one app entitlement.
+- Make the subscription declaration the single source of catalog membership and
+  app entitlement mapping.
 - Keep StoreKit group levels and renewal periods in StoreKit rather than copying
   them into the catalog.
 - Validate every piece of verified transaction metadata that the static catalog
@@ -62,9 +65,9 @@ transaction pipeline without inventing StoreKit transactions in app code.
 
 ## StoreKit model
 
-An App Store Connect subscription group contains auto-renewable products with
-different access levels and durations. A customer holds one subscription
-product in a group at a time. Products at one level may have monthly and yearly
+An App Store Connect subscription group contains auto-renewable subscriptions
+with different access levels and durations. A customer holds one subscription
+in a group at a time. Subscriptions at one level may have monthly and yearly
 variants.
 
 StoreKit owns these facts:
@@ -94,28 +97,23 @@ enum SubscriptionEntitlement: Hashable, Sendable {
     case tier2
 }
 
-enum Plans: AutoRenewableSubscriptionGroup {
+enum Plans: AutoRenewableSubscriptionGroup<SubscriptionEntitlement> {
     static let id = SubscriptionGroupID(
         rawValue: "YOUR_SUBSCRIPTION_GROUP_ID"
     )
 
-    enum ProductID: String, CaseIterable {
+    enum ProductID: String {
         case tier1_Monthly = "com.example.subscription.tier1.monthly"
         case tier1_Yearly = "com.example.subscription.tier1.yearly"
         case tier2_Monthly = "com.example.subscription.tier2.monthly"
         case tier2_Yearly = "com.example.subscription.tier2.yearly"
     }
 
-    static func entitlement(
-        for productID: ProductID
-    ) -> SubscriptionEntitlement {
-        switch productID {
-        case .tier1_Monthly, .tier1_Yearly:
-            .tier1
-
-        case .tier2_Monthly, .tier2_Yearly:
-            .tier2
-        }
+    static var subscriptions: StoreSubscriptions {
+        StoreSubscription(.tier1_Monthly, entitlement: .tier1)
+        StoreSubscription(.tier1_Yearly, entitlement: .tier1)
+        StoreSubscription(.tier2_Monthly, entitlement: .tier2)
+        StoreSubscription(.tier2_Yearly, entitlement: .tier2)
     }
 }
 
@@ -196,7 +194,7 @@ struct ContentView: View {
 }
 ```
 
-Monthly and yearly products granting the same access map to the same
+Monthly and yearly subscriptions granting the same access map to the same
 entitlement. StoreKit owns upgrade and downgrade ordering. If several plan
 identities grant one feature, the app checks the accepted entitlement values;
 the catalog does not infer tier inclusion.
@@ -234,16 +232,57 @@ public struct SubscriptionGroupID:
     public init(rawValue: String)
 }
 
+public struct StoreSubscription<ProductID, Entitlement>:
+    Sendable
+where
+    ProductID: RawRepresentable<String> & Hashable & Sendable,
+    Entitlement: Hashable & Sendable
+{
+    public let id: ProductID
+    public let entitlement: Entitlement
+
+    public init(
+        _ id: ProductID,
+        entitlement: Entitlement
+    )
+}
+
+@resultBuilder
+public struct StoreSubscriptionsBuilder<ProductID, Entitlement>
+where
+    ProductID: RawRepresentable<String> & Hashable & Sendable,
+    Entitlement: Hashable & Sendable
+{
+    public typealias Element =
+        StoreSubscription<ProductID, Entitlement>
+
+    public static func buildExpression(
+        _ expression: Element
+    ) -> Element
+
+    public static func buildBlock(
+        _ first: Element,
+        _ rest: Element...
+    ) -> [Element]
+}
+
 public protocol AutoRenewableSubscriptionGroup<Entitlement> {
     associatedtype Entitlement: Hashable & Sendable
     associatedtype ProductID:
-        RawRepresentable<String> & CaseIterable
+        RawRepresentable<String> & Hashable & Sendable
 
     static var id: SubscriptionGroupID { get }
 
-    static func entitlement(
-        for productID: ProductID
-    ) -> Entitlement
+    @StoreSubscriptionsBuilder<
+        Self.ProductID,
+        Self.Entitlement
+    >
+    static var subscriptions: Self.StoreSubscriptions { get }
+}
+
+public extension AutoRenewableSubscriptionGroup {
+    typealias StoreSubscriptions =
+        [StoreSubscription<ProductID, Entitlement>]
 }
 
 public struct AutoRenewableSubscriptionCatalog<Entitlement>: Sendable
@@ -388,41 +427,89 @@ keys.
 ### Type-safety boundary
 
 The nested Product ID type prevents a Product ID declared for another group
-from being passed to a group-specific API. The exhaustive
-`entitlement(for:)` switch maps every declared Product ID, and
-`SubscriptionGroupID` prevents group IDs from being confused with Product IDs.
-Feature code sees the app's `Entitlement`, not raw identifiers.
+from being passed to a group-specific API. The primary associated type in
+`AutoRenewableSubscriptionGroup<SubscriptionEntitlement>` fixes the app
+entitlement type at the conformance, and the builder then accepts only that
+group's `ProductID` and entitlement values. `SubscriptionGroupID` prevents group
+IDs from being confused with Product IDs. Feature code sees the app's
+`Entitlement`, not raw identifiers.
+
+`subscriptions` is the single source of catalog membership and mapping.
+Declaring a case or static member on `ProductID` does not by itself make that
+identifier a managed subscription; a `StoreSubscription` entry does.
+The catalog therefore does not require `CaseIterable` or reconcile a second
+list of identifiers with the builder output.
 
 The compiler cannot validate App Store Connect. Runtime validation is therefore
 part of the catalog contract. The name `SubscriptionGroupID` mirrors StoreKit's
 `subscriptionGroupID`; the auto-renewable qualifier belongs on the group and
-catalog types that define product scope.
+catalog types that define subscription scope.
 
 The client-conformance protocol stays intentionally small. The catalog consumes
-`ProductID.allCases` synchronously and stores normalized strings plus the
-`ObjectIdentifier` of the declaring group type. It retains no group instance,
-group metatype, or typed Product ID. The declaration identity is used only to
-prevent a testing command from substituting another conformance with the same
-raw identifiers but a different mapping. Future optional metadata belongs in a
-configuration value or catalog initializer rather than a new protocol
-requirement.
+`subscriptions` synchronously and stores normalized strings, entitlement values,
+and the `ObjectIdentifier` of the declaring group type. It retains no group
+instance, group metatype, or typed Product ID. The declaration identity is used
+only to prevent a testing command from substituting another conformance with
+the same raw identifiers but a different mapping. Future optional metadata
+belongs in a configuration value or catalog initializer rather than a new
+protocol requirement.
+
+### Apple API analog
+
+This declaration shape follows the Xcode 27 `Evaluations` framework in three
+places: `Evaluation.Evaluators` resolves a nested collection alias from a
+conformance's associated types, `EvaluatorsBuilder` makes that collection
+declarative, and `Evaluator` provides an inline concrete element. Here,
+`StoreSubscriptions` resolves to an array of inline `StoreSubscription` values.
+
+This is an API-shape analog only. StoreTransactionKit does not import
+`Evaluations`, and adopting the shape does not raise the package's deployment
+targets to OS 27.
+
+The collection property is named `subscriptions`, matching
+`SubscriptionStoreView.init(subscriptions:)`. The unqualified `Subscription`
+and `Subscriptions` names are not used: Combine already exports a protocol and
+namespace with those exact names. `StoreSubscription` and
+`StoreSubscriptions` retain the subscription vocabulary while avoiding that
+collision. The enclosing group and catalog types retain the `AutoRenewable`
+qualifier because they define the StoreKit product scope.
+
+The analogy stops at the storage boundary. Evaluations needs
+`any EvaluatorProtocol<Sample, Subject>` because one list can contain different
+evaluator implementations. Every subscription entry has the same
+`ProductID`-plus-`Entitlement` shape, so StoreTransactionKit uses one generic
+value and introduces no per-subscription protocol, existential, closure-backed
+mapping, or type erasure.
+
+The group remains a static schema and the catalog initializer continues to take
+its metatype. `buildExpression` gives each `StoreSubscription` initializer the
+group's concrete `ProductID` and `Entitlement` context. The builder DSL exposes
+only those element expressions and flat `buildBlock` composition; it does not
+add optional, either, or array syntax. A witness getter can bypass the builder
+transformation with an explicit `return`, so the API does not claim to make
+runtime-dependent declarations unrepresentable. The catalog evaluates the
+getter once during construction, snapshots that returned declaration, and does
+not observe later getter results.
 
 ### Construction
 
 `SubscriptionGroupID.init(rawValue:)` preconditions that its value is not empty.
-Catalog construction performs no StoreKit request and preconditions that:
+Catalog construction evaluates the static subscription declaration once,
+performs no StoreKit request, and preconditions that:
 
-- `ProductID.allCases` is not empty.
+- At least one subscription is declared.
 - Every Product ID raw value is nonempty.
 - No raw Product ID is repeated within the group.
 
 These are static programmer errors, so the initializer remains nonthrowing.
 Duplicate entitlement values are valid and expected for monthly and yearly
-products at one access level.
+subscriptions at one access level. Declaration order has no semantic meaning;
+the catalog normalizes entries into its lookup.
 
 ### Runtime validation and projection
 
-For each verified transaction in a candidate `StoreEntitlements` snapshot, the
+A Product ID is declared only when it appears in a `subscriptions` entry. For
+each verified transaction in a candidate `StoreEntitlements` snapshot, the
 catalog applies these rules before publication:
 
 1. A declared Product ID must have `productType == .autoRenewable`.
@@ -700,7 +787,7 @@ separate design, not another member of `AutoRenewableSubscriptionGroup`.
 
 | Responsibility | Owner |
 | --- | --- |
-| Group ID, Product IDs, and Product ID to app-entitlement mapping | App-defined `AutoRenewableSubscriptionGroup` |
+| Group ID, typed Product IDs, catalog membership, and entitlement mapping | App-defined `AutoRenewableSubscriptionGroup.subscriptions` |
 | Catalog lookup and verified metadata validation | `AutoRenewableSubscriptionCatalog` |
 | Choosing live or override mode | App composition root |
 | Fixed override normalization and publication | `TransactionStore` availability owner |
@@ -937,11 +1024,11 @@ entitlement cannot be reverse-mapped to one monthly or yearly product.
 A group whose ID differs from the catalog throws
 `subscriptionGroupMismatch(expected:actual:)`. A different group declaration
 that reuses the same ID throws
-`subscriptionGroupTypeMismatch(subscriptionGroupID:)`; the catalog declaration
-and mapping remain authoritative. A raw Product ID absent from that declaration
-throws `undeclaredProduct(productID:subscriptionGroupID:)`. All checks complete
-before synthetic transaction admission, invoke no delegate method, and leave
-state unchanged.
+`subscriptionGroupTypeMismatch(subscriptionGroupID:)`; the catalog's declaring
+group and `subscriptions` mapping remain authoritative. A raw Product ID absent
+from that declaration throws `undeclaredProduct(productID:subscriptionGroupID:)`.
+All checks complete before synthetic transaction admission, invoke no delegate
+method, and leave state unchanged.
 
 `purchase(_:,in:)` returns only after:
 
@@ -1059,9 +1146,13 @@ scheduling, restore UI, history, expiration, and revocation.
 
 ### Catalog and state
 
-- Every monthly and yearly Product ID maps to its expected entitlement.
-- Empty group IDs, Product IDs, and Product ID case sets fail at construction.
+- Every monthly and yearly `StoreSubscription` maps to its expected
+  entitlement.
+- Empty group IDs, subscription declarations, and Product ID raw values fail at
+  construction.
 - Duplicate raw Product IDs fail; duplicate entitlement values remain valid.
+- A typed Product ID that has no `subscriptions` entry is not a catalog member
+  and is rejected by typed testing commands before admission.
 - Known Product IDs with a wrong type or group fail projection.
 - An undeclared non-upgraded Product ID in the managed group fails projection.
 - An undeclared upgraded Product ID in the managed group with a non-auto-
@@ -1116,7 +1207,8 @@ scheduling, restore UI, history, expiration, and revocation.
 
 ### Testing and distribution
 
-- The external production fixture builds the released README against public API.
+- After implementation, the external production fixture builds the README
+  examples against public API.
 - A testing fixture starts ready-empty, purchases a typed Product ID, and reads
   its ViewModel change immediately after the command returns without `.storekit`.
 - Wrong group ID, substituted group declaration, and undeclared Product ID
@@ -1144,8 +1236,10 @@ scheduling, restore UI, history, expiration, and revocation.
 - App-hosted StoreKit tests cover monthly/yearly products, real upgrade and
   downgrade behavior, restore, renewal, expiration, revocation, and recovery.
 - The testing product is not imported transitively by production consumers.
-- Swift 6 strict-concurrency builds cover primary-associated-type, Clock
-  existential, actor/class delegate, and Sendable surfaces.
+- Swift 6 strict-concurrency builds cover the specialized primary-associated-
+  type conformance, nested `StoreSubscriptions` alias, generic
+  `StoreSubscriptionsBuilder`, Clock existential, actor/class delegate, and
+  Sendable surfaces.
 - Symbol DocC and the consumer article build without warnings.
 
 ## Implementation transaction
@@ -1157,13 +1251,16 @@ The redesign is complete only when one change updates all of the following:
 - The `StoreTransactionKitTesting` product and its one-way target dependency.
 - Package-scoped production seams used by the synthetic source.
 - Production and testing external consumer fixtures.
-- The released README and hosted DocC examples.
+- The README examples, removal of their proposal label, and hosted DocC
+  examples.
 - Every dependent app and its resolved package revision.
 
-Until that transaction lands, the README must show only the released API. Once
-the contract is implemented and moved into symbol DocC and a consumer article,
-this proposal is deleted. No compatibility alias or deprecated initializer is
-planned while the package is beta.
+Until that transaction lands, the README labels the consumer sketch as proposed
+and the current symbol documentation remains authoritative for compilable API.
+Once the contract is implemented, the proposal label is removed and the
+contract moves into symbol DocC and a consumer article; this document is then
+deleted. No compatibility alias or deprecated initializer is planned while the
+package is beta.
 
 ## References
 
@@ -1173,6 +1270,14 @@ planned while the package is beta.
 - [`Product.SubscriptionInfo.subscriptionPeriod`](https://developer.apple.com/documentation/storekit/product/subscriptioninfo/subscriptionperiod)
 - [`Transaction.isUpgraded`](https://developer.apple.com/documentation/storekit/transaction/isupgraded)
 - [`Transaction.currentEntitlements`](https://developer.apple.com/documentation/storekit/transaction/currententitlements)
+- [`SubscriptionStoreView.init(subscriptions:)`](https://developer.apple.com/documentation/storekit/subscriptionstoreview/init(subscriptions:))
+- [`Combine.Subscription`](https://developer.apple.com/documentation/combine/subscription)
+- [`Combine.Subscriptions`](https://developer.apple.com/documentation/combine/subscriptions)
+- [`Evaluation`](https://developer.apple.com/documentation/evaluations/evaluation)
+- [`Evaluation.Evaluators`](https://developer.apple.com/documentation/evaluations/evaluation/evaluators-swift.typealias)
+- [`EvaluatorsBuilder`](https://developer.apple.com/documentation/evaluations/evaluatorsbuilder)
+- [`EvaluatorProtocol`](https://developer.apple.com/documentation/evaluations/evaluatorprotocol)
+- [`Evaluator`](https://developer.apple.com/documentation/evaluations/evaluator)
 - [`WKNavigationDelegate`](https://developer.apple.com/documentation/webkit/wknavigationdelegate)
 - [`TaskLocal`](https://developer.apple.com/documentation/swift/tasklocal)
 - [`Task.detached(priority:operation:)`](https://developer.apple.com/documentation/swift/task/detached(priority:operation:))

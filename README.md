@@ -22,46 +22,61 @@ In Xcode, choose **File > Add Package Dependencies**, enter
 
 ## Quick start
 
-Define typed identifiers whose raw values exactly match the Product IDs in App
-Store Connect:
+The APIs shown below are proposed for the next beta. The current source does not
+implement them yet.
+
+Define the app's entitlements and one App Store Connect auto-renewable
+subscription group:
 
 ```swift
 import StoreTransactionKit
 
-enum SubscriptionID: String, Hashable, Sendable {
-    case monthly = "com.example.subscription.monthly"
-    case yearly = "com.example.subscription.yearly"
+enum SubscriptionEntitlement: Hashable, Sendable {
+    case tier1
+    case tier2
 }
+
+enum Plans: AutoRenewableSubscriptionGroup<SubscriptionEntitlement> {
+    static let id = SubscriptionGroupID(
+        rawValue: "YOUR_SUBSCRIPTION_GROUP_ID"
+    )
+
+    enum ProductID: String {
+        case tier1_Monthly = "com.example.subscription.tier1.monthly"
+        case tier1_Yearly = "com.example.subscription.tier1.yearly"
+        case tier2_Monthly = "com.example.subscription.tier2.monthly"
+        case tier2_Yearly = "com.example.subscription.tier2.yearly"
+    }
+
+    static var subscriptions: StoreSubscriptions {
+        StoreSubscription(.tier1_Monthly, entitlement: .tier1)
+        StoreSubscription(.tier1_Yearly, entitlement: .tier1)
+        StoreSubscription(.tier2_Monthly, entitlement: .tier2)
+        StoreSubscription(.tier2_Yearly, entitlement: .tier2)
+    }
+}
+
+let subscriptionCatalog = AutoRenewableSubscriptionCatalog(Plans.self)
 ```
 
-Create one store at the app's process-lifetime composition root. In this
-subscription-only example, StoreKit's current-entitlement state is the complete
-app effect. If the app also persists an effect, the transaction handler returns
-only after that work is complete. The failure handler records failures owned by
-background work:
+Use the subscription group ID and Product IDs exactly as configured in
+[App Store Connect][subscription-setup]. Monthly and yearly subscriptions can
+grant the same app entitlement.
+
+Create one store at the app's process-lifetime composition root:
 
 ```swift
 import StoreTransactionKit
-import OSLog
 import SwiftUI
 
 @main
 struct ExampleApp: App {
-    @State private var store: TransactionStore<SubscriptionID>
+    @State private var store: TransactionStore<SubscriptionEntitlement>
 
     init() {
-        let logger = Logger(
-            subsystem: "com.example.app",
-            category: "StoreKit"
-        )
         _store = State(
             initialValue: TransactionStore(
-                handleTransaction: { _ in },
-                reportFailure: { failure in
-                    logger.error(
-                        "StoreKit background failure: \(failure.underlyingError)"
-                    )
-                }
+                subscriptionCatalog: subscriptionCatalog
             )
         )
     }
@@ -77,8 +92,8 @@ struct ExampleApp: App {
 }
 ```
 
-Read the store directly from the environment. Entitlement availability does not
-need to block the rest of the UI:
+Read the store directly and gate only the paid feature. Entitlement
+availability does not need to block the rest of the UI:
 
 ```swift
 import StoreKit
@@ -86,12 +101,11 @@ import StoreTransactionKit
 import SwiftUI
 
 struct ContentView: View {
-    @Environment(TransactionStore<SubscriptionID>.self) private var store
+    @Environment(TransactionStore<SubscriptionEntitlement>.self) private var store
     @State private var isShowingPaywall = false
 
-    private var hasPremium: Bool {
-        store.activeEntitlements?
-            .isDisjoint(with: [.monthly, .yearly]) == false
+    private var canExportPDF: Bool {
+        store.isEntitled(to: .tier1)
     }
 
     var body: some View {
@@ -106,7 +120,7 @@ struct ContentView: View {
                 Button("Export as PDF") {
                     exportPDF()
                 }
-                .disabled(!hasPremium)
+                .disabled(!canExportPDF)
 
                 Button("Plans and subscriptions") {
                     isShowingPaywall = true
@@ -116,55 +130,94 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $isShowingPaywall) {
-            SubscriptionStoreView(
-                groupID: "YOUR_SUBSCRIPTION_GROUP_ID"
-            )
+            SubscriptionStoreView(groupID: Plans.id.rawValue)
         }
     }
 }
 ```
 
-Use the subscription group ID from App Store Connect for
-`SubscriptionStoreView`. Use the same Product IDs in the app and in the active
-`.storekit` configuration when running local StoreKit tests.
-
 No `onInAppPurchaseCompletion` modifier is needed for the default StoreKit-view
-flow: successful purchases arrive through `Transaction.updates`, which the store
-monitors. If you supply a completion action, pass each successful result to
-`store.process(_:)` and present failures yourself.
+flow. Successful purchases arrive through `Transaction.updates`, which the
+store monitors. Use the same Product IDs in the active `.storekit`
+configuration when running local StoreKit tests.
 
 ## Entitlement availability
 
-- `activeEntitlements == nil` means no entitlement query has succeeded yet. An
-  empty set means the query succeeded and none of the typed Product IDs is
+- `activeEntitlements == nil` means no usable entitlement snapshot is
+  available. An empty set means the query succeeded and no app entitlement is
   active.
-- `startupError` describes a failed initial readiness attempt. The store keeps
-  monitoring, and a later successful `refreshEntitlements()` clears it.
-- Transactions superseded by a subscription upgrade remain in `entitlements`
-  but are excluded from `activeEntitlements`.
+- `entitlementStatus` explains whether the store is loading, failed, ready, or
+  using an app-supplied override.
+- `isEntitled(to:)` performs exact membership and returns `false` while the
+  entitlement set is unavailable.
 
 Keep normal app content usable while the entitlement set is unavailable. Gate
-only the features that require an active purchase.
+only features that require an active purchase.
 
-## Transaction handling
+## Override entitlements
 
-StoreTransactionKit may present the same verified transaction revision to
-`handleTransaction` more than once. Make the handler idempotent and return only
-after its app-owned business effect is durable; the store calls `finish()` after
-the handler succeeds. `reportFailure` receives failures owned by background
-work. Neither callback may start another operation on the same store.
+An app-defined debug, preview, or distribution environment can bypass StoreKit
+with an exact entitlement set:
 
-For the delivery, reconciliation, restore, shutdown, and failure-routing
-contracts, see
-[Understanding transaction handling][understanding].
+```swift
+let store = TransactionStore(
+    subscriptionCatalog: subscriptionCatalog,
+    overridingEntitlements: [
+        SubscriptionEntitlement.tier1,
+        .tier2,
+    ]
+)
+```
+
+## Transaction delegate
+
+The delegate is optional. Supply one only when the app owns an additional
+durable transaction effect, handles a product outside the subscription catalog,
+or needs background-failure notifications. Without a delegate, automatic
+handling finishes only catalog-validated auto-renewable subscriptions.
+
+For policy, redelivery, failure routing, and shutdown contracts, see the
+[API design](Docs/AutoRenewableSubscriptionCatalogAPI.md).
 
 ## Testing
 
-The app-hosted StoreKit integration suite runs with `xcodebuild`. See
-[Tools/TestApp/README.md](Tools/TestApp/README.md) for its scenarios and command.
+App and ViewModel tests can use `StoreTransactionKitTesting` without a
+`.storekit` configuration:
+
+```swift
+import StoreTransactionKitTesting
+import Testing
+
+@Test
+@MainActor
+func subscriptionUpdatesViewModel() async throws {
+    try await withTransactionStoreTestHarness(
+        subscriptionCatalog: subscriptionCatalog
+    ) { harness in
+        let viewModel = NotesViewModel(store: harness.store)
+
+        #expect(!viewModel.canExportPDF)
+
+        try await harness.purchase(
+            .tier1_Monthly,
+            in: Plans.self
+        )
+
+        #expect(viewModel.canExportPDF)
+    }
+}
+```
+
+`purchase(_:,in:)` returns after the resulting entitlement publication, so the
+test needs no timing guess. Inject `TransactionStoreTestClock` into the app
+component that owns a delay or deadline.
+
+The app-hosted StoreKit integration suite continues to test the live adapter.
+See [Tools/TestApp/README.md](Tools/TestApp/README.md) for its scenarios and
+command.
 
 ## License
 
 StoreTransactionKit is available under the MIT License.
 
-[understanding]: https://lynnswap.github.io/StoreTransactionKit/documentation/storetransactionkit/understandingtransactionhandling
+[subscription-setup]: https://developer.apple.com/help/app-store-connect/manage-subscriptions/offer-auto-renewable-subscriptions
