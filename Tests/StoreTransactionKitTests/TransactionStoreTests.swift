@@ -148,13 +148,13 @@ struct TransactionStoreTests {
         )
         try await store.waitForInitialReadiness()
 
-        let undeclared = makeSnapshot(
+        let contradictory = makeSnapshot(
             id: 5,
-            productID: "test.subscription.retired.current",
-            productType: .autoRenewable,
+            productID: TestPlans.ProductID.tier1Monthly.rawValue,
+            productType: .nonConsumable,
             subscriptionGroupID: TestPlans.id.rawValue
         )
-        await current.replace(with: [undeclared])
+        await current.replace(with: [contradictory])
 
         await #expect(throws: AutoRenewableSubscriptionCatalogError.self) {
             _ = try await store.refreshEntitlements()

@@ -1,7 +1,10 @@
-package enum AutoRenewableSubscriptionClassification:
+package enum AutoRenewableSubscriptionClassification<Entitlement>:
     Equatable,
     Sendable
+where Entitlement: Hashable & Sendable
 {
-    case managed
+    case declared(Entitlement)
+    case retiredUpgraded
+    case unrecognized
     case unmanaged
 }

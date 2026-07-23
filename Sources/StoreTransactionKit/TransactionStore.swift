@@ -89,12 +89,14 @@ where Entitlement: Hashable & Sendable {
     /// Creates the process's live StoreKit store for an auto-renewable subscription catalog.
     ///
     /// Initialization starts transaction monitoring and the first entitlement
-    /// reconciliation. The store strongly retains `delegate` until terminal
+    /// reconciliation. The store strongly retains both delegates until terminal
     /// shutdown. Creating a second live store in the same process before the
     /// first store finishes ``close()`` is a programmer error.
     public convenience init(
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
-        delegate: (any TransactionStoreDelegate)? = nil
+        delegate: (any TransactionStoreDelegate)? = nil,
+        unrecognizedSubscriptionDelegate:
+            (any UnrecognizedSubscriptionDelegate<Entitlement>)? = nil
     ) {
         let liveLease = LiveTransactionStoreLease.acquire()
         let lifecycle = TransactionStoreLifecycle(liveLease: liveLease)
@@ -103,7 +105,9 @@ where Entitlement: Hashable & Sendable {
             lifecycle: lifecycle,
             backendKind: .live,
             subscriptionCatalog: subscriptionCatalog,
-            delegate: delegate
+            delegate: delegate,
+            unrecognizedSubscriptionDelegate:
+                unrecognizedSubscriptionDelegate
         )
     }
 
@@ -129,13 +133,17 @@ where Entitlement: Hashable & Sendable {
     convenience init(
         source: StoreTransactionSource,
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
-        delegate: (any TransactionStoreDelegate)? = nil
+        delegate: (any TransactionStoreDelegate)? = nil,
+        unrecognizedSubscriptionDelegate:
+            (any UnrecognizedSubscriptionDelegate<Entitlement>)? = nil
     ) {
         self.init(
             source: source,
             lifecycle: TransactionStoreLifecycle(),
             subscriptionCatalog: subscriptionCatalog,
-            delegate: delegate
+            delegate: delegate,
+            unrecognizedSubscriptionDelegate:
+                unrecognizedSubscriptionDelegate
         )
     }
 
@@ -143,14 +151,18 @@ where Entitlement: Hashable & Sendable {
         source: StoreTransactionSource,
         lifecycle: TransactionStoreLifecycle,
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
-        delegate: (any TransactionStoreDelegate)? = nil
+        delegate: (any TransactionStoreDelegate)? = nil,
+        unrecognizedSubscriptionDelegate:
+            (any UnrecognizedSubscriptionDelegate<Entitlement>)? = nil
     ) {
         self.init(
             source: source,
             lifecycle: lifecycle,
             backendKind: .live,
             subscriptionCatalog: subscriptionCatalog,
-            delegate: delegate
+            delegate: delegate,
+            unrecognizedSubscriptionDelegate:
+                unrecognizedSubscriptionDelegate
         )
     }
 
@@ -158,6 +170,8 @@ where Entitlement: Hashable & Sendable {
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
         syntheticSource: SyntheticStoreTransactionSource,
         delegate: (any TransactionStoreDelegate)? = nil,
+        unrecognizedSubscriptionDelegate:
+            (any UnrecognizedSubscriptionDelegate<Entitlement>)? = nil,
         unavailableOperationError:
             @escaping @Sendable (StoreTransactionOperation) -> any Error
     ) {
@@ -166,7 +180,9 @@ where Entitlement: Hashable & Sendable {
             lifecycle: TransactionStoreLifecycle(),
             backendKind: .synthetic(unavailableOperationError),
             subscriptionCatalog: subscriptionCatalog,
-            delegate: delegate
+            delegate: delegate,
+            unrecognizedSubscriptionDelegate:
+                unrecognizedSubscriptionDelegate
         )
     }
 
@@ -180,7 +196,9 @@ where Entitlement: Hashable & Sendable {
         lifecycle: TransactionStoreLifecycle,
         backendKind: BackendKind,
         subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
-        delegate: (any TransactionStoreDelegate)?
+        delegate: (any TransactionStoreDelegate)?,
+        unrecognizedSubscriptionDelegate:
+            (any UnrecognizedSubscriptionDelegate<Entitlement>)?
     ) {
         let sessionID = UUID()
         let owner = TransactionStoreAvailabilityOwner<Entitlement>()
@@ -190,6 +208,8 @@ where Entitlement: Hashable & Sendable {
             lifecycle: lifecycle,
             subscriptionCatalog: subscriptionCatalog,
             delegate: delegate,
+            unrecognizedSubscriptionDelegate:
+                unrecognizedSubscriptionDelegate,
             entitlementOutcome: { outcome in
                 await owner.apply(outcome)
             }
@@ -233,10 +253,10 @@ where Entitlement: Hashable & Sendable {
 
     /// Processes a direct result from custom purchase UI.
     ///
-    /// A successful verified purchase completes only after policy selection,
-    /// finishing, causal entitlement reconciliation, and main-actor publication.
-    /// Pending and user-cancelled results return their corresponding semantic
-    /// outcome without transaction processing.
+    /// A verified purchase returns only after policy selection, the selected
+    /// finish or leave action, causal entitlement reconciliation, and main-actor
+    /// publication. Pending and user-cancelled results return their corresponding
+    /// semantic outcome without transaction processing.
     public func process(
         _ result: Product.PurchaseResult
     ) async throws -> StorePurchaseOutcome {

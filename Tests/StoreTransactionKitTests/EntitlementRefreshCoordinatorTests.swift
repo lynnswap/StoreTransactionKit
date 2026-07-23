@@ -36,9 +36,7 @@ struct EntitlementRefreshCoordinatorTests {
         let receiptCompleted = TestSignal()
         let coordinator = EntitlementRefreshCoordinator<TestEntitlement>(
             query: { _ in try await query.next() },
-            project: {
-                (_: StoreEntitlements) throws(AutoRenewableSubscriptionCatalogError)
-                    -> Set<TestEntitlement> in
+            project: { _ in
                 [.tier1]
             },
             didComplete: { _ in
@@ -71,16 +69,14 @@ struct EntitlementRefreshCoordinatorTests {
         let query = ControlledReconciliationQuery()
         let failures = FailureReporterDispatcher()
         let outcomes = RefreshOutcomeRecorder()
-        let catalogError = AutoRenewableSubscriptionCatalogError.undeclaredProduct(
-            productID: "undeclared",
-            subscriptionGroupID: TestPlans.id
+        let catalogError = AutoRenewableSubscriptionCatalogError.productTypeMismatch(
+            productID: "invalid",
+            actual: .nonRenewable
         )
         let coordinator = EntitlementRefreshCoordinator<TestEntitlement>(
             query: { _ in try await query.next() },
-            project: {
-                (_: StoreEntitlements) throws(AutoRenewableSubscriptionCatalogError)
-                    -> Set<TestEntitlement> in
-                throw catalogError
+            project: { _ in
+                throw StoreTransactionCatalogFailure(error: catalogError)
             },
             didComplete: { outcome in await outcomes.append(outcome) },
             failures: failures
@@ -104,9 +100,7 @@ struct EntitlementRefreshCoordinatorTests {
     ) -> EntitlementRefreshCoordinator<TestEntitlement> {
         EntitlementRefreshCoordinator(
             query: { _ in try await query.next() },
-            project: {
-                (_: StoreEntitlements) throws(AutoRenewableSubscriptionCatalogError)
-                    -> Set<TestEntitlement> in
+            project: { _ in
                 []
             },
             didComplete: { _ in },
