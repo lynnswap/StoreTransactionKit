@@ -134,7 +134,7 @@ struct AutoRenewableSubscriptionCatalogTests {
                 )
             )
             Issue.record("Projection unexpectedly accepted a non-consumable product.")
-        } catch let error as AutoRenewableSubscriptionCatalogError {
+        } catch let error {
             guard case let .productTypeMismatch(actualProductID, actual) = error else {
                 Issue.record("Unexpected catalog error: \(error)")
                 return
@@ -142,8 +142,6 @@ struct AutoRenewableSubscriptionCatalogTests {
 
             #expect(actualProductID == productID)
             #expect(actual == .nonConsumable)
-        } catch {
-            Issue.record("Unexpected error: \(error)")
         }
     }
 
@@ -161,7 +159,7 @@ struct AutoRenewableSubscriptionCatalogTests {
                 )
             )
             Issue.record("Classification unexpectedly accepted the wrong group.")
-        } catch let error as AutoRenewableSubscriptionCatalogError {
+        } catch let error {
             guard
                 case let .subscriptionGroupMismatch(
                     actualProductID,
@@ -176,8 +174,6 @@ struct AutoRenewableSubscriptionCatalogTests {
             #expect(actualProductID == productID)
             #expect(expected == Plans.id)
             #expect(actual == "other-group")
-        } catch {
-            Issue.record("Unexpected error: \(error)")
         }
     }
 
@@ -198,7 +194,7 @@ struct AutoRenewableSubscriptionCatalogTests {
                 )
             )
             Issue.record("Projection unexpectedly accepted an undeclared product.")
-        } catch let error as AutoRenewableSubscriptionCatalogError {
+        } catch let error {
             guard
                 case let .undeclaredProduct(
                     actualProductID,
@@ -211,8 +207,6 @@ struct AutoRenewableSubscriptionCatalogTests {
 
             #expect(actualProductID == productID)
             #expect(subscriptionGroupID == Plans.id)
-        } catch {
-            Issue.record("Unexpected error: \(error)")
         }
     }
 
@@ -231,7 +225,7 @@ struct AutoRenewableSubscriptionCatalogTests {
                 )
             )
             Issue.record("Classification unexpectedly accepted the wrong type.")
-        } catch let error as AutoRenewableSubscriptionCatalogError {
+        } catch let error {
             guard case let .productTypeMismatch(actualProductID, actual) = error else {
                 Issue.record("Unexpected catalog error: \(error)")
                 return
@@ -239,8 +233,6 @@ struct AutoRenewableSubscriptionCatalogTests {
 
             #expect(actualProductID == productID)
             #expect(actual == .nonRenewable)
-        } catch {
-            Issue.record("Unexpected error: \(error)")
         }
     }
 
@@ -264,13 +256,11 @@ struct AutoRenewableSubscriptionCatalogTests {
                 )
             )
             Issue.record("Projection unexpectedly returned a partial set.")
-        } catch let error as AutoRenewableSubscriptionCatalogError {
+        } catch let error {
             guard case .undeclaredProduct = error else {
                 Issue.record("Unexpected catalog error: \(error)")
                 return
             }
-        } catch {
-            Issue.record("Unexpected error: \(error)")
         }
     }
 
