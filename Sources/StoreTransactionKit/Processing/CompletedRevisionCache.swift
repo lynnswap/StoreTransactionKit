@@ -1,9 +1,14 @@
 import Foundation
 
 package struct CompletedRevisionCache {
+    package enum State: Sendable {
+        case needsRefresh
+        case satisfied
+    }
+
     private let capacity: Int
     private var insertionOrder: [Data] = []
-    private var membership: Set<Data> = []
+    private var states: [Data: State] = [:]
 
     package init(capacity: Int = 512) {
         precondition(capacity > 0)
@@ -11,15 +16,26 @@ package struct CompletedRevisionCache {
     }
 
     package func contains(_ revision: Data) -> Bool {
-        membership.contains(revision)
+        states[revision] != nil
     }
 
-    package mutating func insert(_ revision: Data) {
-        guard membership.insert(revision).inserted else { return }
+    package func state(for revision: Data) -> State? {
+        states[revision]
+    }
+
+    package mutating func insert(
+        _ revision: Data,
+        state: State = .needsRefresh
+    ) {
+        guard states[revision] == nil else {
+            states[revision] = state
+            return
+        }
+        states[revision] = state
         insertionOrder.append(revision)
         if insertionOrder.count > capacity {
             let evicted = insertionOrder.removeFirst()
-            membership.remove(evicted)
+            states.removeValue(forKey: evicted)
         }
     }
 }

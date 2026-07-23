@@ -1,238 +1,404 @@
-import Foundation
 import Observation
 import StoreKit
 
-/// An observable, process-owned StoreKit store.
+/// An observable, process-owned StoreKit transaction and entitlement store.
 ///
-/// Create one store in the application's process composition root. The store
-/// starts transaction monitoring during initialization and publishes complete
-/// current-entitlement snapshots on the main actor.
-/// Public operations other than ``close()`` wait for the startup attempt,
-/// including durable handling of startup unfinished transactions, to complete.
-///
-/// `EntitlementID` is an app-defined, string-backed identifier. Values whose
-/// raw values match a current StoreKit entitlement appear in
-/// ``activeEntitlements``. The complete verified projection remains available
-/// through ``entitlements`` so identifiers outside that app-defined type are
-/// never hidden.
-///
-/// <doc:UnderstandingTransactionHandling> describes the delivery,
-/// reconciliation, and failure-reporting model behind this type.
+/// A live store monitors StoreKit deliveries, owns `Transaction.finish()`
+/// authority, and publishes raw and app-defined entitlement state together on
+/// the main actor. Create one live instance at the application composition root
+/// and retain it for the process lifetime.
 @MainActor
 @Observable
-public final class TransactionStore<EntitlementID>
-where
-    EntitlementID: RawRepresentable & Hashable & Sendable,
-    EntitlementID.RawValue == String
-{
-    /// The latest verified current-entitlement projection.
-    ///
-    /// The value is `nil` until the first entitlement query succeeds. An empty
-    /// projection is non-`nil` and means StoreKit reported no current
-    /// entitlements. Elements that StoreKit can't verify are omitted and
-    /// reported through the failure callback.
-    public private(set) var entitlements: StoreEntitlements?
+public final class TransactionStore<Entitlement>
+where Entitlement: Hashable & Sendable {
+    private enum EntitlementAvailability {
+        case loading
+        case failed(any Error)
+        case ready(
+            entitlements: StoreEntitlements,
+            activeEntitlements: Set<Entitlement>
+        )
+        case overridden(activeEntitlements: Set<Entitlement>)
+    }
 
-    /// App-defined identifiers represented by the latest active entitlements.
+    private enum Backend: Sendable {
+        case liveRuntime(
+            StoreTransactionRuntime<Entitlement>,
+            TransactionStoreLifecycle
+        )
+        case syntheticRuntime(
+            StoreTransactionRuntime<Entitlement>,
+            TransactionStoreLifecycle,
+            @Sendable (StoreTransactionOperation) -> any Error
+        )
+        case override
+    }
+
+    private struct RuntimeAdmission: Sendable {
+        let runtime: StoreTransactionRuntime<Entitlement>
+        let leases: FiniteOperationLeases
+    }
+
+    /// The availability of the typed entitlement projection.
     ///
-    /// The value is `nil` until the first entitlement query succeeds. An empty
-    /// set is non-`nil` and means none of the app-defined identifiers is
-    /// currently entitled. Transactions superseded by a subscription upgrade
-    /// remain available through ``entitlements`` but don't appear in this set.
-    public var activeEntitlements: Set<EntitlementID>? {
-        entitlements.map { entitlements in
-            Set(
-                entitlements.transactions.compactMap {
-                    guard !$0.isUpgraded else { return nil }
-                    return EntitlementID(rawValue: $0.productID)
-                })
+    /// Inspect this value when the UI needs to distinguish loading or failure
+    /// from a ready empty entitlement set.
+    public var entitlementStatus: EntitlementStatus {
+        switch availability {
+        case .loading:
+            .loading
+        case .failed(let error):
+            .failed(error)
+        case .ready:
+            .ready
+        case .overridden:
+            .overridden
         }
     }
 
-    /// The error from the initial readiness attempt.
+    /// The latest complete raw StoreKit entitlement projection.
     ///
-    /// Startup includes durable handling of every verified transaction still
-    /// reported by `Transaction.unfinished`. Transaction monitoring remains
-    /// active after a recoverable startup failure. A later successful
-    /// entitlement refresh retries unfinished work and clears this value.
-    public private(set) var startupError: (any Error)?
+    /// This value is non-`nil` only in ``EntitlementStatus/ready``. Override
+    /// mode has no synthetic raw StoreKit projection.
+    public var entitlements: StoreEntitlements? {
+        guard case .ready(let entitlements, _) = availability else {
+            return nil
+        }
+        return entitlements
+    }
+
+    /// The app-defined entitlements granted by the current catalog projection.
+    ///
+    /// A non-`nil` empty set authoritatively means that no declared entitlement
+    /// is active. The value is `nil` while loading or when no usable projection
+    /// is available after failure.
+    public var activeEntitlements: Set<Entitlement>? {
+        switch availability {
+        case .ready(_, let activeEntitlements),
+            .overridden(let activeEntitlements):
+            activeEntitlements
+        case .loading, .failed:
+            nil
+        }
+    }
 
     @ObservationIgnored private let sessionID: UUID
-    @ObservationIgnored private let transactionSession: StoreTransactionSession
-    @ObservationIgnored private let startupCompletion: ProcessingReceipt<Void>
-    @ObservationIgnored private var startupTask: Task<Void, Never>?
-    @ObservationIgnored private var startupOrdering = TransactionStoreStartupOrdering()
+    @ObservationIgnored private let backend: Backend
+    private var availability: EntitlementAvailability
 
-    /// Creates and starts an observable StoreKit store.
+    /// Creates the process's live StoreKit store for an auto-renewable subscription catalog.
     ///
-    /// - Parameters:
-    ///   - handleTransaction: Applies the durable business effect for a verified
-    ///     transaction. StoreTransactionKit exposes an at-least-once
-    ///     handler-delivery contract, so the handler must be idempotent.
-    ///     StoreTransactionKit calls `finish()` only after the closure returns
-    ///     successfully. The handler must not call back into the same store,
-    ///     directly or through an awaited child or detached task, because doing
-    ///     so creates a dependency cycle with the operation being handled.
-    ///   - reportFailure: Receives failures owned by process background work,
-    ///     including background deliveries, unfinished and current-entitlement
-    ///     verification, and direct operations abandoned by every caller. A
-    ///     background-owned failure can also fail an enclosing startup or
-    ///     refresh. Admitted failures are delivered serially with backpressure,
-    ///     and ``close()`` waits for every callback to return. Record or enqueue
-    ///     each failure promptly. This callback must not call back into the same
-    ///     store, directly or through an awaited child or detached task.
+    /// Initialization starts transaction monitoring and the first entitlement
+    /// reconciliation. The store strongly retains `delegate` until terminal
+    /// shutdown. Creating a second live store in the same process before the
+    /// first store finishes ``close()`` is a programmer error.
     public convenience init(
-        handleTransaction:
-            @escaping @Sendable (StoreTransactionSnapshot) async throws -> Void,
-        reportFailure:
-            @escaping @Sendable (StoreTransactionBackgroundFailure) async -> Void
+        subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
+        delegate: (any TransactionStoreDelegate)? = nil
     ) {
+        let liveLease = LiveTransactionStoreLease.acquire()
+        let lifecycle = TransactionStoreLifecycle(liveLease: liveLease)
         self.init(
             source: .live,
-            handleTransaction: handleTransaction,
-            reportFailure: reportFailure
+            lifecycle: lifecycle,
+            backendKind: .live,
+            subscriptionCatalog: subscriptionCatalog,
+            delegate: delegate
         )
     }
 
-    package init(
-        source: StoreTransactionSource,
-        handleTransaction:
-            @escaping @Sendable (StoreTransactionSnapshot) async throws -> Void,
-        reportFailure:
-            @escaping @Sendable (StoreTransactionBackgroundFailure) async -> Void
+    /// Creates a StoreKit-free store with one authoritative entitlement set.
+    ///
+    /// The sequence is normalized to a set and published immediately with
+    /// ``EntitlementStatus/overridden``. This store performs no StoreKit work,
+    /// has no raw ``entitlements``, and rejects StoreKit-backed operations.
+    public convenience init(
+        subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
+        overridingEntitlements: some Sequence<Entitlement>
     ) {
-        let owner = TransactionStoreOwner<EntitlementID>()
+        _ = subscriptionCatalog
+        self.init(
+            sessionID: UUID(),
+            availability: .overridden(
+                activeEntitlements: Set(overridingEntitlements)
+            ),
+            backend: .override
+        )
+    }
+
+    convenience init(
+        source: StoreTransactionSource,
+        subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
+        delegate: (any TransactionStoreDelegate)? = nil
+    ) {
+        self.init(
+            source: source,
+            lifecycle: TransactionStoreLifecycle(),
+            subscriptionCatalog: subscriptionCatalog,
+            delegate: delegate
+        )
+    }
+
+    convenience init(
+        source: StoreTransactionSource,
+        lifecycle: TransactionStoreLifecycle,
+        subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
+        delegate: (any TransactionStoreDelegate)? = nil
+    ) {
+        self.init(
+            source: source,
+            lifecycle: lifecycle,
+            backendKind: .live,
+            subscriptionCatalog: subscriptionCatalog,
+            delegate: delegate
+        )
+    }
+
+    package convenience init(
+        subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
+        syntheticSource: SyntheticStoreTransactionSource,
+        delegate: (any TransactionStoreDelegate)? = nil,
+        unavailableOperationError:
+            @escaping @Sendable (StoreTransactionOperation) -> any Error
+    ) {
+        self.init(
+            source: syntheticSource.source,
+            lifecycle: TransactionStoreLifecycle(),
+            backendKind: .synthetic(unavailableOperationError),
+            subscriptionCatalog: subscriptionCatalog,
+            delegate: delegate
+        )
+    }
+
+    private enum BackendKind: Sendable {
+        case live
+        case synthetic(@Sendable (StoreTransactionOperation) -> any Error)
+    }
+
+    private convenience init(
+        source: StoreTransactionSource,
+        lifecycle: TransactionStoreLifecycle,
+        backendKind: BackendKind,
+        subscriptionCatalog: AutoRenewableSubscriptionCatalog<Entitlement>,
+        delegate: (any TransactionStoreDelegate)?
+    ) {
         let sessionID = UUID()
-        let startupCompletion = ProcessingReceipt<Void>()
-        let transactionSession = StoreTransactionSession(
+        let owner = TransactionStoreAvailabilityOwner<Entitlement>()
+        let runtime = StoreTransactionRuntime(
             sessionID: sessionID,
             source: source,
-            handleTransaction: handleTransaction,
-            entitlementsDidChange: { _ in },
-            entitlementRefreshDidSucceed: { success in
-                await owner.apply(success)
-            },
-            reportFailure: reportFailure
-        )
-        self.sessionID = sessionID
-        self.transactionSession = transactionSession
-        self.startupCompletion = startupCompletion
-        owner.store = self
-
-        startupTask = Task { [weak self, transactionSession] in
-            defer { startupCompletion.succeed(()) }
-            do {
-                _ = try await transactionSession.startForTransactionStore()
-            } catch let failure as StoreTransactionReadinessFailure {
-                guard !Task.isCancelled else { return }
-                self?.applyStartupFailure(
-                    token: failure.refreshToken,
-                    error: failure.underlyingError
-                )
-            } catch {
-                // Explicit close cancels only this readiness waiter. The
-                // session's close operation owns draining accepted work.
-                guard !Task.isCancelled else { return }
-                self?.startupOrdering.recordUnsequencedFailure()
-                self?.startupError = error
+            lifecycle: lifecycle,
+            subscriptionCatalog: subscriptionCatalog,
+            delegate: delegate,
+            entitlementOutcome: { outcome in
+                await owner.apply(outcome)
             }
+        )
+        let backend: Backend
+        switch backendKind {
+        case .live:
+            backend = .liveRuntime(runtime, lifecycle)
+        case .synthetic(let unavailableOperationError):
+            backend = .syntheticRuntime(
+                runtime,
+                lifecycle,
+                unavailableOperationError
+            )
         }
+        self.init(
+            sessionID: sessionID,
+            availability: .loading,
+            backend: backend
+        )
+        owner.attach(self)
+        runtime.start()
+    }
+
+    private init(
+        sessionID: UUID,
+        availability: EntitlementAvailability,
+        backend: Backend
+    ) {
+        self.sessionID = sessionID
+        self.availability = availability
+        self.backend = backend
+    }
+
+    /// Returns whether the exact app-defined entitlement is active.
+    ///
+    /// This method returns `false` while entitlement state is unavailable.
+    public func isEntitled(to entitlement: Entitlement) -> Bool {
+        activeEntitlements?.contains(entitlement) == true
     }
 
     /// Processes a direct result from custom purchase UI.
     ///
-    /// StoreKit views deliver successful purchases through
-    /// `Transaction.updates` by default and don't need to call this
-    /// method. Use it for a result returned directly by a `Product` purchase
-    /// API or by a custom StoreKit view completion action.
+    /// A successful verified purchase completes only after policy selection,
+    /// finishing, causal entitlement reconciliation, and main-actor publication.
+    /// Pending and user-cancelled results return their corresponding semantic
+    /// outcome without transaction processing.
     public func process(
         _ result: Product.PurchaseResult
     ) async throws -> StorePurchaseOutcome {
-        try await waitForStartupAttempt(operation: .processPurchase)
-        return try await transactionSession.process(result)
+        let admission = try admit(operation: .processPurchase)
+        return try await admission.runtime.process(
+            result,
+            leases: admission.leases
+        )
     }
 
-    /// Refreshes current entitlements and updates observable store state.
+    func process(
+        _ delivery: StoreTransactionDelivery,
+        didAdmit: @escaping @Sendable () async -> Void = {}
+    ) async throws -> StorePurchaseOutcome {
+        let admission = try admit(operation: .processPurchase)
+        return try await admission.runtime.process(
+            delivery,
+            leases: admission.leases,
+            didAdmit: didAdmit
+        )
+    }
+
+    @discardableResult
+    package func processSyntheticDelivery(
+        _ delivery: StoreTransactionDelivery
+    ) async throws -> StoreTransactionSnapshot {
+        try rejectReentrancy(operation: .processPurchase)
+        guard case .syntheticRuntime(let runtime, let lifecycle, _) = backend else {
+            preconditionFailure(
+                "Synthetic deliveries require a synthetic TransactionStore."
+            )
+        }
+        let leases = try lifecycle.beginOperation()
+        let outcome = try await runtime.process(delivery, leases: leases)
+        guard case .completed(let snapshot) = outcome else {
+            preconditionFailure("A synthetic delivery must complete a transaction.")
+        }
+        return snapshot
+    }
+
+    /// Reconciles unfinished transactions and publishes current entitlements.
     ///
-    /// Before publishing the result, the store durably handles every verified
-    /// transaction currently reported by `Transaction.unfinished`, including
-    /// consumables. A handler failure leaves the transaction unfinished, fails
-    /// this refresh, and allows a later refresh to retry it.
-    ///
-    /// - Returns: The complete verified entitlement projection.
+    /// Raw and typed entitlement values are validated and committed atomically.
     @discardableResult
     public func refreshEntitlements() async throws -> StoreEntitlements {
-        try await waitForStartupAttempt(operation: .currentEntitlements)
-        return try await transactionSession.currentEntitlements()
+        let admission = try admit(operation: .refreshEntitlements)
+        return try await admission.runtime.currentEntitlements(
+            leases: admission.leases
+        )
     }
 
-    /// Returns verified transaction history for a product in newest-first order.
+    /// Returns verified transaction history for one product.
     ///
-    /// StoreKit omits finished consumables unless the app enables
-    /// `SKIncludeConsumableInAppPurchaseHistory` in its information property
-    /// list. Revoked and refunded transactions remain in the returned history.
-    /// Results are ordered by purchase date, signed date, and transaction
-    /// identifier descending, then exact JWS UTF-8 bytes ascending.
+    /// Results are all-or-nothing and ordered newest first.
     public func history(
         for productID: Product.ID
     ) async throws -> [StoreTransactionSnapshot] {
-        try await waitForStartupAttempt(operation: .history)
-        return try await transactionSession.history(for: productID)
+        let admission = try admit(operation: .history)
+        return try await admission.runtime.history(
+            for: productID,
+            leases: admission.leases
+        )
     }
 
-    /// Synchronizes App Store purchases after an explicit user restore action.
+    /// Synchronizes App Store purchases and refreshes entitlements.
     ///
-    /// This method can present authentication UI. It refreshes observable
-    /// entitlement state before returning. StoreKit may throw
-    /// `StoreKitError.userCancelled` when the user dismisses
-    /// authentication; treat that as a normal user outcome rather than a
-    /// diagnostic failure.
+    /// If synchronization succeeds but refresh fails, this method throws
+    /// ``StoreTransactionError/entitlementRefreshFailed(after:underlyingError:)``
+    /// with ``StoreTransactionError/CompletedOperation/synchronizedPurchases``.
     @discardableResult
     public func restorePurchases() async throws -> StoreEntitlements {
-        try await waitForStartupAttempt(operation: .restorePurchases)
-        return try await transactionSession.restorePurchases()
+        let admission = try admit(operation: .restorePurchases)
+        return try await admission.runtime.restorePurchases(
+            leases: admission.leases
+        )
     }
 
-    /// Stops transaction producers and drains every accepted operation.
+    /// Stops producers and drains every operation accepted before closing.
     ///
-    /// Production apps normally retain the store for process lifetime. Call
-    /// this method from controlled shutdown and test lifecycles.
-    ///
-    /// - Throws: ``StoreTransactionError/reentrantOperation(operation:)`` when
-    ///   an injected callback attempts to close the store that is executing it.
+    /// The first call seals admission and starts one shared terminal shutdown.
+    /// Concurrent calls join it, and later calls return successfully. Caller
+    /// cancellation does not abandon shutdown. Calling this method from a
+    /// callback owned by this store throws
+    /// ``StoreTransactionError/reentrantOperation(operation:)``.
     public func close() async throws {
         try rejectReentrancy(operation: .close)
-        startupTask?.cancel()
-        try await transactionSession.close()
-        await startupTask?.value
-        startupTask = nil
-    }
-
-    fileprivate func apply(_ success: EntitlementRefreshSuccess) {
-        entitlements = success.entitlements
-        if startupOrdering.recordSuccess(token: success.token) {
-            startupError = nil
+        switch backend {
+        case .liveRuntime(let runtime, let lifecycle),
+            .syntheticRuntime(let runtime, let lifecycle, _):
+            await lifecycle.close {
+                await runtime.shutdown()
+            }
+        case .override:
+            return
         }
     }
 
-    private func applyStartupFailure(
-        token: UInt64,
-        error: any Error
+    package func waitForInitialReadiness() async throws {
+        switch backend {
+        case .liveRuntime(let runtime, _),
+            .syntheticRuntime(let runtime, _, _):
+            try await runtime.waitForInitialReadiness()
+        case .override:
+            return
+        }
+    }
+
+    package func waitUntilClosing() async {
+        switch backend {
+        case .liveRuntime(_, let lifecycle),
+            .syntheticRuntime(_, let lifecycle, _):
+            await lifecycle.waitUntilSealed()
+        case .override:
+            return
+        }
+    }
+
+    fileprivate func apply(
+        _ outcome: EntitlementRefreshOutcome<Entitlement>
     ) {
-        if startupOrdering.recordFailure(token: token) {
-            startupError = error
+        switch outcome {
+        case .success(let publication):
+            availability = .ready(
+                entitlements: publication.entitlements,
+                activeEntitlements: publication.activeEntitlements
+            )
+        case .transientFailure(let error):
+            guard case .ready = availability else {
+                availability = .failed(error)
+                return
+            }
+        case .catalogFailure(let error):
+            availability = .failed(error)
         }
     }
 
-    private func waitForStartupAttempt(
+    private func admit(
         operation: StoreTransactionOperation
-    ) async throws {
+    ) throws -> RuntimeAdmission {
         try rejectReentrancy(operation: operation)
-        try Task.checkCancellation()
-        do {
-            try await startupCompletion.value()
-        } catch is ProcessingReceiptWaiterCancellation {
-            throw CancellationError()
+        switch backend {
+        case .liveRuntime(let runtime, let lifecycle):
+            return RuntimeAdmission(
+                runtime: runtime,
+                leases: try lifecycle.beginOperation()
+            )
+        case .syntheticRuntime(
+            let runtime,
+            let lifecycle,
+            let unavailableOperationError
+        ):
+            let leases = try lifecycle.beginOperation()
+            guard operation == .refreshEntitlements else {
+                leases.work.end()
+                leases.observer.end()
+                throw unavailableOperationError(operation)
+            }
+            return RuntimeAdmission(runtime: runtime, leases: leases)
+        case .override:
+            throw StoreTransactionError.operationUnavailableInOverride(
+                operation: operation
+            )
         }
     }
 
@@ -246,47 +412,30 @@ where
         }
     }
 
-    package func waitForStartup() async {
-        _ = try? await startupCompletion.terminalValue()
-    }
-
     isolated deinit {
-        startupTask?.cancel()
-    }
-}
-
-package struct TransactionStoreStartupOrdering: Sendable {
-    private var latestSuccessfulToken: UInt64 = 0
-    private var failureToken: UInt64?
-
-    package mutating func recordSuccess(token: UInt64) -> Bool {
-        precondition(token > latestSuccessfulToken)
-        latestSuccessfulToken = token
-        guard let failureToken, token > failureToken else { return false }
-        self.failureToken = nil
-        return true
-    }
-
-    package mutating func recordFailure(token: UInt64) -> Bool {
-        guard latestSuccessfulToken < token else { return false }
-        failureToken = token
-        return true
-    }
-
-    package mutating func recordUnsequencedFailure() {
-        failureToken = latestSuccessfulToken
+        switch backend {
+        case .liveRuntime(let runtime, let lifecycle),
+            .syntheticRuntime(let runtime, let lifecycle, _):
+            lifecycle.sealSynchronously()
+            runtime.cancelSynchronously()
+        case .override:
+            return
+        }
     }
 }
 
 @MainActor
-private final class TransactionStoreOwner<EntitlementID>: Sendable
-where
-    EntitlementID: RawRepresentable & Hashable & Sendable,
-    EntitlementID.RawValue == String
-{
-    weak var store: TransactionStore<EntitlementID>?
+private final class TransactionStoreAvailabilityOwner<Entitlement>: Sendable
+where Entitlement: Hashable & Sendable {
+    private weak var store: TransactionStore<Entitlement>?
 
-    func apply(_ success: EntitlementRefreshSuccess) {
-        store?.apply(success)
+    func attach(_ store: TransactionStore<Entitlement>) {
+        precondition(self.store == nil)
+        self.store = store
+    }
+
+    func apply(_ outcome: EntitlementRefreshOutcome<Entitlement>) {
+        guard let store else { return }
+        store.apply(outcome)
     }
 }

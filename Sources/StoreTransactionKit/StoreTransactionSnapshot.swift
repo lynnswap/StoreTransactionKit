@@ -1,11 +1,12 @@
 import Foundation
 import StoreKit
 
-/// An immutable projection of a transaction that StoreKit verified.
+/// An immutable projection of a verified or test-harness transaction.
 ///
-/// StoreTransactionKit creates snapshots only after StoreKit verification
-/// succeeds. A snapshot never owns the underlying `Transaction` and
-/// exposes no authority to finish it.
+/// StoreTransactionKit creates live snapshots only after StoreKit verification
+/// succeeds. StoreTransactionKitTesting creates deterministic synthetic
+/// snapshots for its transaction-store harness. A snapshot never owns the
+/// underlying `Transaction` and exposes no authority to finish it.
 public struct StoreTransactionSnapshot: Sendable, Hashable {
     /// The identifier of this transaction revision's transaction.
     public let id: UInt64
@@ -75,11 +76,13 @@ public struct StoreTransactionSnapshot: Sendable, Hashable {
     /// The date the App Store signed this transaction revision.
     public let signedDate: Date
 
-    /// The exact JWS Compact Serialization that StoreKit verified.
+    /// The exact verified JWS, or a deterministic testing revision sentinel.
     ///
     /// StoreTransactionKit uses the UTF-8 bytes of this value as its
     /// process-local delivery revision. Consumers must not treat it as a secret
-    /// or persist it as the sole business idempotency key.
+    /// or persist it as the sole business idempotency key. Synthetic snapshots
+    /// use `StoreTransactionKitTesting.synthetic.<transactionID>` instead of a
+    /// signed JWS; their transaction identifiers restart for each harness.
     public let jwsRepresentation: String
 
     package init(

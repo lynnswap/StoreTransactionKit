@@ -1,18 +1,36 @@
 import Foundation
 import StoreKit
 
+package struct CurrentEntitlementReconciliation: Sendable {
+    package let snapshots: [StoreTransactionSnapshot]
+    package let causalClaims: [TransactionCausalResolutionClaim<StoreTransactionSnapshot>]
+    package let diagnostics: [StoreTransactionBackgroundFailure]
+}
+
+package struct CurrentEntitlementReconciliationFailure: Error, Sendable {
+    package let underlyingError: any Error
+    package let causalFailures: [CurrentEntitlementCausalFailure]
+    package let rootReportingAuthorities: [DirectOperationReportingAuthority]
+    package let exactFailures: [CurrentEntitlementExactFailure]
+    package let diagnostics: [StoreTransactionBackgroundFailure]
+}
+
+package struct CurrentEntitlementCausalFailure: Sendable {
+    package let claim: TransactionCausalResolutionClaim<StoreTransactionSnapshot>
+    package let error: any Error
+}
+
+package struct CurrentEntitlementExactFailure: Sendable {
+    package let snapshot: StoreTransactionSnapshot
+    package let reportingAuthority: DirectOperationReportingAuthority
+    package let underlyingError: any Error
+    package let isCausalOwner: Bool
+}
+
 package final class CurrentEntitlementReconciler: Sendable {
-    struct AcceptedTransaction: Sendable {
+    private struct AcceptedTransaction: Sendable {
         let snapshot: StoreTransactionSnapshot
         let acceptance: ProcessingAcceptance<StoreTransactionSnapshot>
-
-        init(
-            snapshot: StoreTransactionSnapshot,
-            acceptance: ProcessingAcceptance<StoreTransactionSnapshot>
-        ) {
-            self.snapshot = snapshot
-            self.acceptance = acceptance
-        }
     }
 
     private struct UnfinishedBatch: Sendable {
@@ -29,7 +47,6 @@ package final class CurrentEntitlementReconciler: Sendable {
     private let currentEntitlements: @Sendable () async throws -> CurrentEntitlementQueryResult
     private let queryUnfinished: @Sendable () async -> [StoreTransactionDelivery]
     private let core: TransactionProcessingCore<StoreTransactionSnapshot>
-    private let failures: FailureReporterDispatcher
 
     package init(
         query:
@@ -37,56 +54,69 @@ package final class CurrentEntitlementReconciler: Sendable {
             -> CurrentEntitlementQueryResult,
         queryUnfinished:
             @escaping @Sendable () async -> [StoreTransactionDelivery],
-        core: TransactionProcessingCore<StoreTransactionSnapshot>,
-        failures: FailureReporterDispatcher
+        core: TransactionProcessingCore<StoreTransactionSnapshot>
     ) {
-        self.currentEntitlements = query
+        currentEntitlements = query
         self.queryUnfinished = queryUnfinished
         self.core = core
-        self.failures = failures
     }
 
     package func query(
         retryFailedTransactions: Bool
-    ) async throws -> [StoreTransactionSnapshot] {
+    ) async throws -> CurrentEntitlementReconciliation {
         if retryFailedTransactions {
             await core.beginRetryAttempt()
         }
         var reconciledRevisions: Set<Data> = []
-        var batch = await unfinishedBatch(
-            excluding: reconciledRevisions
-        )
-        var observedUnfinishedVerificationRevisions: Set<Data> = []
-        var observedUnfinishedVerificationFailures: [any Error] = []
+        var batch = await unfinishedBatch(excluding: reconciledRevisions)
+        var observedVerificationRevisions: Set<Data> = []
+        var diagnostics: [StoreTransactionBackgroundFailure] = []
+        var causalClaims: [TransactionCausalResolutionClaim<StoreTransactionSnapshot>] = []
         collectUnfinishedVerificationFailures(
             batch.verificationFailures,
-            observedRevisions: &observedUnfinishedVerificationRevisions,
-            observedFailures: &observedUnfinishedVerificationFailures
+            observedRevisions: &observedVerificationRevisions,
+            diagnostics: &diagnostics
         )
         var precedingCurrentVerificationFailures: [StoreTransactionVerificationError] = []
 
         while true {
             while !batch.acceptedTransactions.isEmpty {
                 do {
-                    try await drain(batch.acceptedTransactions)
-                } catch {
-                    await reportVerificationFailures(
-                        unfinished: observedUnfinishedVerificationFailures,
-                        currentEntitlements:
-                            precedingCurrentVerificationFailures
+                    causalClaims.append(
+                        contentsOf: try await drain(
+                            batch.acceptedTransactions
+                        )
                     )
-                    throw error
+                } catch let failure as DrainFailure {
+                    appendCurrentEntitlementVerificationFailures(
+                        precedingCurrentVerificationFailures,
+                        to: &diagnostics
+                    )
+                    let rootCausalFailures = causalClaims.map {
+                        CurrentEntitlementCausalFailure(
+                            claim: $0,
+                            error: failure.underlyingError
+                        )
+                    }
+                    throw CurrentEntitlementReconciliationFailure(
+                        underlyingError: failure.underlyingError,
+                        causalFailures:
+                            rootCausalFailures + failure.causalFailures,
+                        rootReportingAuthorities:
+                            causalClaims.map(\.reportingAuthority)
+                            + failure.rootReportingAuthorities,
+                        exactFailures: failure.exactFailures,
+                        diagnostics: diagnostics
+                    )
+                } catch {
+                    preconditionFailure("Unclassified reconciliation failure: \(error)")
                 }
                 reconciledRevisions.formUnion(batch.revisions)
-                batch = await unfinishedBatch(
-                    excluding: reconciledRevisions
-                )
+                batch = await unfinishedBatch(excluding: reconciledRevisions)
                 collectUnfinishedVerificationFailures(
                     batch.verificationFailures,
-                    observedRevisions:
-                        &observedUnfinishedVerificationRevisions,
-                    observedFailures:
-                        &observedUnfinishedVerificationFailures
+                    observedRevisions: &observedVerificationRevisions,
+                    diagnostics: &diagnostics
                 )
             }
 
@@ -94,10 +124,19 @@ package final class CurrentEntitlementReconciler: Sendable {
             do {
                 result = try await currentEntitlements()
             } catch {
-                await reportUnfinishedVerificationFailures(
-                    observedUnfinishedVerificationFailures
+                throw CurrentEntitlementReconciliationFailure(
+                    underlyingError: error,
+                    causalFailures: causalClaims.map {
+                        CurrentEntitlementCausalFailure(
+                            claim: $0,
+                            error: error
+                        )
+                    },
+                    rootReportingAuthorities:
+                        causalClaims.map(\.reportingAuthority),
+                    exactFailures: [],
+                    diagnostics: diagnostics
                 )
-                throw error
             }
 
             let postQueryBatch = await unfinishedBatch(
@@ -105,21 +144,22 @@ package final class CurrentEntitlementReconciler: Sendable {
             )
             collectUnfinishedVerificationFailures(
                 postQueryBatch.verificationFailures,
-                observedRevisions:
-                    &observedUnfinishedVerificationRevisions,
-                observedFailures:
-                    &observedUnfinishedVerificationFailures
+                observedRevisions: &observedVerificationRevisions,
+                diagnostics: &diagnostics
             )
             guard !postQueryBatch.acceptedTransactions.isEmpty else {
-                await reportVerificationFailures(
-                    unfinished: observedUnfinishedVerificationFailures,
-                    currentEntitlements: result.verificationFailures
+                appendCurrentEntitlementVerificationFailures(
+                    result.verificationFailures,
+                    to: &diagnostics
                 )
-                return result.snapshots
+                return CurrentEntitlementReconciliation(
+                    snapshots: result.snapshots,
+                    causalClaims: causalClaims,
+                    diagnostics: diagnostics
+                )
             }
             batch = postQueryBatch
-            precedingCurrentVerificationFailures =
-                result.verificationFailures
+            precedingCurrentVerificationFailures = result.verificationFailures
         }
     }
 
@@ -143,13 +183,15 @@ package final class CurrentEntitlementReconciler: Sendable {
                     AcceptedTransaction(
                         snapshot: envelope.value,
                         acceptance: await core.accept(envelope)
-                    ))
+                    )
+                )
             case .unverified(let revision, let error):
                 verificationFailures.append(
                     UnfinishedVerificationFailure(
                         revision: revision,
                         error: error
-                    ))
+                    )
+                )
             }
         }
 
@@ -163,71 +205,101 @@ package final class CurrentEntitlementReconciler: Sendable {
     private func collectUnfinishedVerificationFailures(
         _ verificationFailures: [UnfinishedVerificationFailure],
         observedRevisions: inout Set<Data>,
-        observedFailures: inout [any Error]
+        diagnostics: inout [StoreTransactionBackgroundFailure]
     ) {
         for failure in verificationFailures
         where observedRevisions.insert(failure.revision).inserted {
-            observedFailures.append(failure.error)
-        }
-    }
-
-    private func reportVerificationFailures(
-        unfinished: [any Error],
-        currentEntitlements: [StoreTransactionVerificationError]
-    ) async {
-        await reportUnfinishedVerificationFailures(unfinished)
-        await reportCurrentEntitlementVerificationFailures(
-            currentEntitlements
-        )
-    }
-
-    private func reportUnfinishedVerificationFailures(
-        _ verificationFailures: [any Error]
-    ) async {
-        for failure in verificationFailures {
-            await failures.enqueue(
+            diagnostics.append(
                 StoreTransactionBackgroundFailure(
                     source: .unfinished,
                     transactionID: nil,
                     productID: nil,
-                    underlyingError: failure
+                    underlyingError: failure.error
                 )
             )
         }
     }
 
-    func drain(_ transactions: [AcceptedTransaction]) async throws {
-        var firstError: (any Error)?
-        for transaction in transactions {
-            do {
-                _ = try await transaction.acceptance.receipt.terminalValue()
-            } catch {
-                if transaction.acceptance.role == .owner {
-                    let failure = StoreTransactionBackgroundFailure(
-                        source: .unfinished,
-                        transactionID: transaction.snapshot.id,
-                        productID: transaction.snapshot.productID,
-                        underlyingError: error
-                    )
-                    await failures.enqueue(failure)
-                }
-                if firstError == nil {
-                    firstError = StoreTransactionFailureWithReportingOwner(
-                        underlyingError: error
-                    )
-                }
-            }
-        }
-        if let firstError {
-            throw firstError
-        }
+    private struct DrainFailure: Error, Sendable {
+        let underlyingError: any Error
+        let causalFailures: [CurrentEntitlementCausalFailure]
+        let rootReportingAuthorities: [DirectOperationReportingAuthority]
+        let exactFailures: [CurrentEntitlementExactFailure]
     }
 
-    private func reportCurrentEntitlementVerificationFailures(
-        _ verificationFailures: [StoreTransactionVerificationError]
-    ) async {
+    private func drain(
+        _ transactions: [AcceptedTransaction]
+    ) async throws -> [TransactionCausalResolutionClaim<StoreTransactionSnapshot>] {
+        var claimedTransactions:
+            [(
+                transaction: AcceptedTransaction,
+                claim: TransactionCausalResolutionClaim<StoreTransactionSnapshot>?
+            )] = []
+        for transaction in transactions {
+            claimedTransactions.append(
+                (
+                    transaction,
+                    await transaction.acceptance.claimCausalResolutionIfOwner()
+                )
+            )
+        }
+
+        var exactFailures: [CurrentEntitlementExactFailure] = []
+        for entry in claimedTransactions {
+            do {
+                _ = try await entry.transaction.acceptance.receipt.terminalValue()
+            } catch {
+                exactFailures.append(
+                    CurrentEntitlementExactFailure(
+                        snapshot: entry.transaction.snapshot,
+                        reportingAuthority:
+                            entry.transaction.acceptance.reportingAuthority,
+                        underlyingError: error,
+                        isCausalOwner: entry.claim != nil
+                    )
+                )
+            }
+        }
+        if let firstFailure = exactFailures.first {
+            let additionalOwnedAuthorities = exactFailures.dropFirst()
+                .filter(\.isCausalOwner)
+                .map(\.reportingAuthority)
+            let causalFailures: [CurrentEntitlementCausalFailure] =
+                claimedTransactions.compactMap { entry in
+                    guard let claim = entry.claim else { return nil }
+                    let exactError = exactFailures.first { failure in
+                        failure.reportingAuthority
+                            === entry.transaction.acceptance.reportingAuthority
+                    }?.underlyingError
+                    return CurrentEntitlementCausalFailure(
+                        claim: claim,
+                        error: exactError ?? firstFailure.underlyingError
+                    )
+                }
+            let rootReportingAuthorities =
+                causalFailures
+                .map { $0.claim.reportingAuthority }
+                .filter { authority in
+                    !additionalOwnedAuthorities.contains {
+                        $0 === authority
+                    }
+                } + [firstFailure.reportingAuthority]
+            throw DrainFailure(
+                underlyingError: firstFailure.underlyingError,
+                causalFailures: causalFailures,
+                rootReportingAuthorities: rootReportingAuthorities,
+                exactFailures: exactFailures
+            )
+        }
+        return claimedTransactions.compactMap(\.claim)
+    }
+
+    private func appendCurrentEntitlementVerificationFailures(
+        _ verificationFailures: [StoreTransactionVerificationError],
+        to diagnostics: inout [StoreTransactionBackgroundFailure]
+    ) {
         for failure in verificationFailures {
-            await failures.enqueue(
+            diagnostics.append(
                 StoreTransactionBackgroundFailure(
                     source: .currentEntitlementVerification,
                     transactionID: nil,

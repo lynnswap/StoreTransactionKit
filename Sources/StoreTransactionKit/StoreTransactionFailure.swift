@@ -1,4 +1,5 @@
 import Foundation
+import StoreKit
 
 /// A store operation that can appear in lifecycle and diagnostic errors.
 public enum StoreTransactionOperation: Sendable, Hashable {
@@ -6,7 +7,7 @@ public enum StoreTransactionOperation: Sendable, Hashable {
     case processPurchase
 
     /// Refreshing the current entitlement projection.
-    case currentEntitlements
+    case refreshEntitlements
 
     /// Querying transaction history for one product.
     case history
@@ -94,8 +95,17 @@ package struct StoreTransactionFailurePropagation: Sendable {
     }
 }
 
-/// An error caused by using a store outside its documented lifecycle.
-public enum StoreTransactionError: Error, Sendable, Hashable {
+/// An error produced while operating a transaction store.
+public enum StoreTransactionError: Error, Sendable {
+    /// An irreversible StoreKit action that completed before a later operation failed.
+    public enum CompletedOperation: Sendable, Hashable {
+        /// The framework finished the exact transaction revision.
+        case finishedTransaction(StoreTransactionSnapshot)
+
+        /// The framework successfully synchronized purchases with the App Store.
+        case synchronizedPurchases
+    }
+
     /// The store has begun its shared close operation and accepts no new work.
     case closing
 
@@ -105,6 +115,12 @@ public enum StoreTransactionError: Error, Sendable, Hashable {
     /// StoreKit returned a purchase result unknown to this framework version.
     case unknownPurchaseResult
 
+    /// Automatic handling was requested for a product outside the managed catalog.
+    case unhandledTransaction(
+        productID: Product.ID,
+        productType: Product.ProductType
+    )
+
     /// A consumer callback attempted to reenter its own session.
     ///
     /// Reentrancy with propagated callback context is rejected because a
@@ -113,6 +129,20 @@ public enum StoreTransactionError: Error, Sendable, Hashable {
     /// detached task that calls the same store: detached tasks don't carry the
     /// callback context but can still create the same dependency cycle.
     case reentrantOperation(operation: StoreTransactionOperation)
+
+    /// A StoreKit-backed operation was requested from a fixed override store.
+    case operationUnavailableInOverride(
+        operation: StoreTransactionOperation
+    )
+
+    /// Entitlement refresh failed after an irreversible StoreKit action completed.
+    ///
+    /// Retry ``TransactionStore/refreshEntitlements()`` instead of repeating
+    /// the completed action.
+    case entitlementRefreshFailed(
+        after: CompletedOperation,
+        underlyingError: any Error
+    )
 }
 
 package enum StoreTransactionLifecycleError: Error, Sendable {

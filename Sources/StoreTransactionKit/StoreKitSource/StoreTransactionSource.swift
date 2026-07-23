@@ -22,10 +22,12 @@ package struct CurrentEntitlementQueryResult: Sendable {
 package struct StoreTransactionSource: Sendable {
     package let runUpdates:
         @Sendable (
+            @Sendable () -> FiniteOperationLease?,
             @Sendable (StoreTransactionDelivery) async -> Void
         ) async -> Void
     package let runSubscriptionStatusUpdates:
         @Sendable (
+            @Sendable () -> FiniteOperationLease?,
             @Sendable () async -> Void
         ) async -> Void
     package let currentEntitlements: @Sendable () async throws -> CurrentEntitlementQueryResult
@@ -37,10 +39,12 @@ package struct StoreTransactionSource: Sendable {
     package init(
         runUpdates:
             @escaping @Sendable (
+                @Sendable () -> FiniteOperationLease?,
                 @Sendable (StoreTransactionDelivery) async -> Void
             ) async -> Void,
         runSubscriptionStatusUpdates:
             @escaping @Sendable (
+                @Sendable () -> FiniteOperationLease?,
                 @Sendable () async -> Void
             ) async -> Void,
         currentEntitlements:

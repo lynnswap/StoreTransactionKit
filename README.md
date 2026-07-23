@@ -1,7 +1,7 @@
 # StoreTransactionKit
 
-StoreTransactionKit moves StoreKit 2 transaction monitoring, verification,
-durable processing, and `Transaction.finish()` into one process-owned,
+StoreTransactionKit centralizes verified transaction handling, entitlement
+reconciliation, and `Transaction.finish()` authority in one process-owned,
 observable store.
 
 ## Requirements
@@ -14,236 +14,231 @@ observable store.
 - visionOS 2.4+
 - Swift 6.3+
 
-## What it owns — and what your app owns
+## Installation
 
-The store owns the durable transaction path for the process lifetime:
-
-- Monitoring: `Transaction.updates`, `Transaction.unfinished` reconciliation,
-  and subscription status changes
-- Verification: only verified transactions reach your code; unverified
-  deliveries surface as thrown errors or reported failures
-- Ordering: durable handling first, then `finish()`, with at-least-once
-  delivery to an idempotent handler and exact-revision deduplication
-- State: the observable current-entitlement projection, restore
-  synchronization, background failure delivery, and explicit shutdown
-
-Your app owns everything the user sees and everything it persists:
-
-- Paywall and purchase UI (StoreKit views or the platform-appropriate
-  StoreKit purchase action)
-- The durable ledger that the transaction handler writes to
-- Subscription status presentation (`Product.SubscriptionInfo.Status`)
-- Purchases that begin outside the app on platforms that provide
-  `PurchaseIntent.intents`
+In Xcode, choose **File > Add Package Dependencies**, enter
+`https://github.com/lynnswap/StoreTransactionKit`, and add the
+`StoreTransactionKit` library to your app target.
 
 ## Quick start
 
-Define the entitlement identifiers in the app. A string-backed enum keeps
-StoreKit product identifiers typed without requiring a framework protocol.
+Define the app's entitlements and one App Store Connect auto-renewable
+subscription group:
 
 ```swift
 import StoreTransactionKit
 
-enum SubscriptionID: String, Hashable, Sendable {
-    case monthly = "com.example.subscription.monthly"
-    case yearly = "com.example.subscription.yearly"
+enum SubscriptionEntitlement: Hashable, Sendable {
+    case tier1
+    case tier2
 }
 
-actor PurchaseLedger {
-    func apply(_ transaction: StoreTransactionSnapshot) async throws {
-        if let revocationDate = transaction.revocationDate {
-            try await database.revokePurchase(
-                transactionID: transaction.id,
-                productID: transaction.productID,
-                signedDate: transaction.signedDate,
-                revocationDate: revocationDate
-            )
-        } else {
-            try await database.commitPurchase(
-                transactionID: transaction.id,
-                productID: transaction.productID,
-                signedDate: transaction.signedDate
-            )
-        }
-    }
-}
-
-actor StoreDiagnostics {
-    func record(_ failure: StoreTransactionBackgroundFailure) {
-        logger.error("StoreKit background failure: \(failure.underlyingError)")
-    }
-}
-
-@MainActor
-func makeStore(
-    ledger: PurchaseLedger,
-    diagnostics: StoreDiagnostics
-) -> TransactionStore<SubscriptionID> {
-    TransactionStore(
-        handleTransaction: { transaction in
-            try await ledger.apply(transaction)
-        },
-        reportFailure: { failure in
-            await diagnostics.record(failure)
-        }
+enum Plans: AutoRenewableSubscriptionGroup<SubscriptionEntitlement> {
+    static let id = SubscriptionGroupID(
+        rawValue: "YOUR_SUBSCRIPTION_GROUP_ID"
     )
+
+    enum ProductID: String, Hashable, Sendable {
+        case tier1_Monthly = "com.example.subscription.tier1.monthly"
+        case tier1_Yearly = "com.example.subscription.tier1.yearly"
+        case tier2_Monthly = "com.example.subscription.tier2.monthly"
+        case tier2_Yearly = "com.example.subscription.tier2.yearly"
+    }
+
+    static var subscriptions: StoreSubscriptions {
+        StoreSubscription(.tier1_Monthly, entitlement: .tier1)
+        StoreSubscription(.tier1_Yearly, entitlement: .tier1)
+        StoreSubscription(.tier2_Monthly, entitlement: .tier2)
+        StoreSubscription(.tier2_Yearly, entitlement: .tier2)
+    }
 }
+
+let subscriptionCatalog = AutoRenewableSubscriptionCatalog(Plans.self)
 ```
 
-`TransactionStore` is `@MainActor` and `@Observable`. It starts monitoring
-during initialization. Create the app-owned dependencies once at the
-process-lifetime composition root, retain one store with SwiftUI state, and
-inject that same instance into the environment:
+Use the subscription group ID and Product IDs exactly as configured in
+[App Store Connect][subscription-setup]. Monthly and yearly subscriptions can
+grant the same app entitlement.
+
+Create one store at the app's process-lifetime composition root:
 
 ```swift
+import StoreTransactionKit
 import SwiftUI
 
 @main
 struct ExampleApp: App {
-    @State private var store: TransactionStore<SubscriptionID>
+    @State private var store: TransactionStore<SubscriptionEntitlement>
 
     init() {
-        let ledger = PurchaseLedger()
-        let diagnostics = StoreDiagnostics()
         _store = State(
-            initialValue: makeStore(
-                ledger: ledger,
-                diagnostics: diagnostics
+            initialValue: TransactionStore(
+                subscriptionCatalog: subscriptionCatalog
             )
         )
     }
 
     var body: some Scene {
         WindowGroup {
-            PremiumStoreView()
-                .environment(store)
+            NavigationStack {
+                ContentView()
+            }
+            .environment(store)
         }
     }
 }
 ```
 
-The view reads the store directly and renders the three entitlement states —
-resolving, failed, and resolved:
+Read the store directly and gate only the paid feature. Entitlement
+availability does not need to block the rest of the UI:
 
 ```swift
 import StoreKit
+import StoreTransactionKit
 import SwiftUI
 
-struct PremiumStoreView: View {
-    @Environment(TransactionStore<SubscriptionID>.self) private var store
-    @State private var refreshError: (any Error)?
+struct ContentView: View {
+    @Environment(TransactionStore<SubscriptionEntitlement>.self) private var store
+    @State private var isShowingPaywall = false
+
+    private var canExportPDF: Bool {
+        store.isEntitled(to: .tier1)
+    }
 
     var body: some View {
-        VStack {
-            if let activeEntitlements = store.activeEntitlements {
-                if activeEntitlements.contains(.monthly)
-                    || activeEntitlements.contains(.yearly)
-                {
-                    Label("Premium active", systemImage: "checkmark.seal.fill")
+        List {
+            Section {
+                NavigationLink("All notes") {
+                    NotesView()
                 }
-            } else if let error = refreshError ?? store.startupError {
-                Text(error.localizedDescription)
-                Button("Retry") {
-                    Task {
-                        do {
-                            try await store.refreshEntitlements()
-                            refreshError = nil
-                        } catch {
-                            refreshError = error
-                        }
-                    }
-                }
-            } else {
-                ProgressView()
             }
 
-            SubscriptionStoreView(
-                groupID: "YOUR_SUBSCRIPTION_GROUP_ID"
-            )
+            Section {
+                Button("Export as PDF") {
+                    exportPDF()
+                }
+                .disabled(!canExportPDF)
+
+                Button("Plans and subscriptions") {
+                    isShowingPaywall = true
+                }
+            } header: {
+                Text("Premium")
+            }
+        }
+        .sheet(isPresented: $isShowingPaywall) {
+            SubscriptionStoreView(groupID: Plans.id.rawValue)
         }
     }
 }
 ```
 
-No `onInAppPurchaseCompletion` modifier is needed: successful StoreKit view
-purchases arrive through `Transaction.updates`, which the store already
-monitors. If you add a non-`nil` completion action, it replaces that default
-*and* StoreKit's failure alert — pass each `.success` value to
-`store.process(_:)` and own `.failure` presentation yourself.
+No `onInAppPurchaseCompletion` modifier is needed for the default StoreKit-view
+flow. Successful purchases arrive through `Transaction.updates`, which the
+store monitors. Use the same Product IDs in the active `.storekit`
+configuration when running local StoreKit tests.
 
-## The callback contracts
+## Entitlement availability
 
-`handleTransaction` owns the app's durable transaction correctness:
+- `activeEntitlements == nil` means no usable entitlement snapshot is
+  available. An empty set means the query succeeded and no app entitlement is
+  active.
+- `entitlementStatus` explains whether the store is loading, failed, ready, or
+  using an app-supplied override.
+- `isEntitled(to:)` performs exact membership and returns `false` while the
+  entitlement set is unavailable.
 
-- **Be idempotent.** Delivery is at least once; key the ledger on transaction
-  identity plus the business event it applies.
-- **Treat purchase and revocation as distinct events.** A refund or
-  family-sharing revocation arrives as the same transaction with
-  `revocationDate` set; transaction ID alone is not a sufficient key.
-- **Return only after the business effect is durable.** The store calls
-  `finish()` after the handler returns. Throwing keeps the transaction
-  unfinished, and a later refresh retries it.
-- **Never call back into the same store** from `handleTransaction` or
-  `reportFailure`, even through an awaited detached task — doing so creates a
-  dependency cycle with the work being handled.
+Keep normal app content usable while the entitlement set is unavailable. Gate
+only features that require an active purchase.
 
-`reportFailure` is also a liveness boundary. StoreTransactionKit delivers
-admitted failures serially with backpressure and waits for each callback to
-return; `close()` waits for those callbacks too. Record or enqueue the failure
-promptly instead of performing work that can wait indefinitely.
+## Override entitlements
 
-Both callback contracts are documented on `TransactionStore.init`.
+An app-defined debug, preview, or distribution environment can bypass StoreKit
+with an exact entitlement set:
 
-## How entitlement state behaves
+```swift
+let store = TransactionStore(
+    subscriptionCatalog: subscriptionCatalog,
+    overridingEntitlements: [
+        SubscriptionEntitlement.tier1,
+        .tier2,
+    ]
+)
+```
 
-- `activeEntitlements` is `nil` until the first entitlement query resolves; an
-  empty set means the query resolved and no known identifier matched.
-- Startup and every refresh reconcile `Transaction.unfinished` — including
-  consumables — before publishing state. A handler failure fails that refresh;
-  the next refresh retries the unfinished work.
-- Transactions superseded by a subscription upgrade stay in `entitlements` but
-  leave `activeEntitlements`.
-- Unverified current-entitlement elements are omitted and reported to
-  `reportFailure` with source `.currentEntitlementVerification`.
-- Identifiers map 1:1 to product IDs. Gate access on the tier set, or use
-  `StoreTransactionSnapshot.subscriptionGroupID` to grant at
-  subscription-group granularity.
+## Transaction delegate
 
-For the full delivery, reconciliation, and failure-reporting model, see
-[Understanding transaction handling][understanding].
+The delegate is optional. Supply one only when the app owns an additional
+durable transaction effect, handles a product outside the subscription catalog,
+or needs background-failure notifications. Without a delegate, automatic
+handling finishes only catalog-validated auto-renewable subscriptions.
 
-## Beyond the basics
+Return `.finish` only after applying an app-owned effect durably. Throwing leaves
+the transaction unfinished so a later StoreKit delivery can retry it.
 
-- **Custom purchase UI** — load products and start the purchase with StoreKit
-  views, SwiftUI's `PurchaseAction`, or the platform-appropriate `Product`
-  purchase API. Pass the resulting `Product.PurchaseResult` to
-  `store.process(_:)`; `.pending` outcomes arrive later through the handler.
-- **Restore** — call `store.restorePurchases()` only from an explicit user
-  action; `AppStore.sync()` presents authentication UI, and
-  `StoreKitError.userCancelled` is a normal outcome, not a diagnostic failure.
-- **Promoted purchases and win-back offers** — on platforms that provide
-  `PurchaseIntent.intents`, the app completes each intent's purchase and
-  passes the result to `store.process(_:)`.
-- **Renewal, grace-period, and billing-retry UI** — read
-  `Product.SubscriptionInfo.Status` directly; the store owns the durable
-  transaction path, not subscription status presentation.
+```swift
+actor AppTransactionDelegate: TransactionStoreDelegate {
+    func decidePolicy(
+        for transaction: StoreTransactionSnapshot
+    ) async throws -> StoreTransactionHandlingPolicy {
+        try await purchaseLedger.apply(transaction)
+        return .finish
+    }
 
-For product merchandising and UI composition, use Apple's
-[Getting started with In-App Purchase using StoreKit views](https://developer.apple.com/documentation/storekit/getting-started-with-in-app-purchases-using-storekit-views)
-and
-[Implementing a store in your app using the StoreKit API](https://developer.apple.com/documentation/storekit/implementing-a-store-in-your-app-using-the-storekit-api).
-Apple's
-[purchase API guidance](https://developer.apple.com/documentation/storekit/product/purchase(options:))
-explains which purchase entry point to use for each UI framework and platform.
+    func didFail(
+        with failure: StoreTransactionBackgroundFailure
+    ) async {
+        diagnostics.record(failure)
+    }
+}
+```
+
+The store serializes policy decisions and background notifications separately.
+Do not call back into the same store from either delegate method.
 
 ## Testing
 
-The app-hosted StoreKit integration suite runs with `xcodebuild`. See
-[Tools/TestApp/README.md](Tools/TestApp/README.md) for the scenarios and
+App and ViewModel tests can use `StoreTransactionKitTesting` without a
+`.storekit` configuration:
+
+```swift
+import StoreTransactionKit
+import StoreTransactionKitTesting
+import Testing
+
+@Test
+@MainActor
+func subscriptionUpdatesViewModel() async throws {
+    try await withTransactionStoreTestHarness(
+        subscriptionCatalog: subscriptionCatalog
+    ) { harness in
+        let viewModel = NotesViewModel(store: harness.store)
+
+        #expect(!viewModel.canExportPDF)
+
+        try await harness.purchase(
+            .tier1_Monthly,
+            in: Plans.self
+        )
+
+        #expect(viewModel.canExportPDF)
+    }
+}
+```
+
+`purchase(_:,in:)` returns after the resulting entitlement publication, so the
+test needs no timing guess. Inject `TransactionStoreTestClock` into the app
+component that owns a delay or deadline.
+
+Add both `StoreTransactionKit` and `StoreTransactionKitTesting` to the test
+target. Keep only `StoreTransactionKit` in the production target.
+
+The app-hosted StoreKit integration suite continues to test the live adapter.
+See [Tools/TestApp/README.md](Tools/TestApp/README.md) for its scenarios and
 command.
 
 ## License
 
 StoreTransactionKit is available under the MIT License.
 
-[understanding]: https://lynnswap.github.io/StoreTransactionKit/documentation/storetransactionkit/understandingtransactionhandling
+[subscription-setup]: https://developer.apple.com/help/app-store-connect/manage-subscriptions/offer-auto-renewable-subscriptions

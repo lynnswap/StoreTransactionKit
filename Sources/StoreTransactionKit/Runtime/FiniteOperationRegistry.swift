@@ -30,9 +30,14 @@ package final class FiniteOperationRegistry: Sendable {
         }
     }
 
-    package func stopAdmissionAndWait() async {
-        let receipt = state.withLock { state -> ProcessingReceipt<Void>? in
+    package func seal() {
+        state.withLock { state in
             state.acceptsInput = false
+        }
+    }
+
+    package func waitForDrain() async {
+        let receipt = state.withLock { state -> ProcessingReceipt<Void>? in
             guard state.count > 0 else { return nil }
             if let receipt = state.drainReceipt { return receipt }
             let receipt = ProcessingReceipt<Void>()
@@ -42,6 +47,11 @@ package final class FiniteOperationRegistry: Sendable {
         if let receipt {
             _ = try? await receipt.terminalValue()
         }
+    }
+
+    package func stopAdmissionAndWait() async {
+        seal()
+        await waitForDrain()
     }
 
     fileprivate func end() {

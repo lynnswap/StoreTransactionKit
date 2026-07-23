@@ -1,10 +1,10 @@
-/// A complete, ordered projection of the current StoreKit entitlements.
+/// A complete, ordered projection of current transaction entitlements.
 public struct StoreEntitlements: Sendable, Equatable {
-    /// Verified current entitlements in a stable order.
+    /// Current transaction snapshots in a stable order.
     ///
     /// Transactions are ordered by product identifier UTF-8 bytes ascending,
     /// then purchase date ascending, transaction identifier ascending, and
-    /// exact JWS UTF-8 bytes ascending.
+    /// revision-representation UTF-8 bytes ascending.
     public let transactions: [StoreTransactionSnapshot]
 
     package init(transactions: [StoreTransactionSnapshot]) {

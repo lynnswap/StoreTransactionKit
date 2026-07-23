@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 package actor FailureReporterDispatcher {
     private struct Item: Sendable {
@@ -7,24 +8,25 @@ package actor FailureReporterDispatcher {
     }
 
     private let sessionID: UUID
+    private let lifetime: TransactionStoreLifecycle?
     private let capacity: Int
-    private let report:
-        @Sendable (StoreTransactionBackgroundFailure) async
-            -> Void
+    private let report: (@Sendable (StoreTransactionBackgroundFailure) async -> Void)?
     private var queue: [Item] = []
     private var spaceWaiters: [ProcessingReceipt<Void>] = []
     private var worker: Task<Void, Never>?
     private var acceptsFailures = true
+    private nonisolated let workerCancellation = TaskCancellationBag()
 
     package init(
         sessionID: UUID = UUID(),
         capacity: Int = 32,
+        lifetime: TransactionStoreLifecycle? = nil,
         report:
-            @escaping @Sendable (StoreTransactionBackgroundFailure) async
-            -> Void
+            (@Sendable (StoreTransactionBackgroundFailure) async -> Void)? = nil
     ) {
         precondition(capacity > 0)
         self.sessionID = sessionID
+        self.lifetime = lifetime
         self.capacity = capacity
         self.report = report
     }
@@ -51,12 +53,18 @@ package actor FailureReporterDispatcher {
         precondition(spaceWaiters.isEmpty)
     }
 
+    package nonisolated func cancelSynchronously() {
+        workerCancellation.cancel()
+    }
+
     private func startWorkerIfNeeded() {
         guard worker == nil else { return }
-        worker = Task.detached { [weak self] in
+        let task = Task.detached { [weak self] in
             guard let self else { return }
             await self.drainQueue()
         }
+        worker = task
+        workerCancellation.insert(task)
     }
 
     private func drainQueue() async {
@@ -71,14 +79,28 @@ package actor FailureReporterDispatcher {
                     callback: .failureReporter
                 )
             ) {
-                await report(item.failure)
+                let errorType = String(
+                    reflecting: type(of: item.failure.underlyingError)
+                )
+                Self.logger.error(
+                    "Background StoreKit failure from \(String(describing: item.failure.source), privacy: .public) [\(errorType, privacy: .public)]"
+                )
+                if let report {
+                    await report(item.failure)
+                }
             }
             item.receipt.succeed(())
         }
         worker = nil
+        workerCancellation.removeAll()
     }
 
     isolated deinit {
         worker?.cancel()
     }
+
+    private nonisolated static let logger = Logger(
+        subsystem: "StoreTransactionKit",
+        category: "TransactionStore"
+    )
 }
