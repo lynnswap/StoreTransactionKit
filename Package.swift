@@ -22,16 +22,30 @@ let package = Package(
         .library(
             name: "StoreTransactionKit",
             targets: ["StoreTransactionKit"]
-        )
+        ),
+        .library(
+            name: "StoreTransactionKitTesting",
+            targets: ["StoreTransactionKitTesting"]
+        ),
     ],
     targets: [
         .target(
             name: "StoreTransactionKit",
             swiftSettings: strictSwiftSettings
         ),
+        .target(
+            name: "StoreTransactionKitTesting",
+            dependencies: ["StoreTransactionKit"],
+            swiftSettings: strictSwiftSettings
+        ),
         .testTarget(
             name: "StoreTransactionKitTests",
             dependencies: ["StoreTransactionKit"],
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
+            name: "StoreTransactionKitTestingTests",
+            dependencies: ["StoreTransactionKitTesting"],
             swiftSettings: strictSwiftSettings
         ),
     ]
