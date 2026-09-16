@@ -90,7 +90,7 @@ with ``StoreTransactionError/CompletedOperation/synchronizedPurchases``.
 ## Reconciliation and publication
 
 The initial load and every entitlement refresh evaluate verified unfinished
-transactions before publishing `Transaction.currentEntitlements`. This keeps
+transactions before publishing the entitlement projection. This keeps
 the observable projection from running ahead of unfinished durable work. A
 revision resolved as `.leaveUnfinished` remains unfinished in StoreKit but
 doesn't block publication or repeat its decision in the same store session.
@@ -98,9 +98,13 @@ Current entitlements that were finished by another process or device may still
 require an unrecognized-subscription decision for typed projection.
 
 The live store observes `Product.SubscriptionInfo.Status.updates`.
-Subscription-status changes trigger current-entitlement reconciliation; status
-isn't a second entitlement source and isn't copied into the app's entitlement
-type.
+Subscription-status changes trigger a fresh entitlement reconciliation. For
+the catalog's subscription group, `Product.SubscriptionInfo.status(for:)`
+determines membership: verified transactions in `.subscribed` or
+`.inGracePeriod` grant access, while expired, revoked, and billing-retry-only
+statuses do not. `Transaction.currentEntitlements` supplies transactions outside
+the managed group. A failed subscription-status query propagates through the
+same refresh failure contract; it is not treated as an empty successful query.
 
 ``TransactionStore/entitlements``,
 ``TransactionStore/activeEntitlements``, and
@@ -127,13 +131,13 @@ same-group product remains in the raw projection without making readiness fail.
 `.leaveUnfinished` and `.finish` grant no typed access;
 `.treatAs(entitlement)` adds the selected value. A thrown unrecognized decision
 is a transient failure, not a catalog contradiction. The raw projection
-otherwise mirrors the verified current-entitlement items StoreKit returns,
-including products outside the managed group.
+contains the verified entitled subscription transactions from the managed
+group together with StoreKit's current-entitlement items outside that group.
 
-StoreKit excludes revoked or refunded transactions from current entitlements.
 For billing retry, grace period, and renewal presentation, use
 `Product.SubscriptionInfo.Status`; do not infer subscription status only from
-snapshot dates.
+snapshot dates. In particular, a grace-period status remains entitled even
+when its transaction's expiration date is in the past.
 
 ## Complete history queries
 

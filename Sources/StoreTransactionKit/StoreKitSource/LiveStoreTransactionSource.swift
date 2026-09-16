@@ -1,7 +1,7 @@
 import StoreKit
 
 package extension StoreTransactionSource {
-    static var live: StoreTransactionSource {
+    static func live(subscriptionGroupID: SubscriptionGroupID) -> StoreTransactionSource {
         StoreTransactionSource(
             runUpdates: { beginIteration, consume in
                 var iterator = Transaction.updates.makeAsyncIterator()
@@ -30,9 +30,25 @@ package extension StoreTransactionSource {
                         verificationFailures.append(error)
                     }
                 }
-                return CurrentEntitlementQueryResult(
+                let transactions = CurrentEntitlementQueryResult(
                     snapshots: snapshots,
                     verificationFailures: verificationFailures
+                )
+                let statuses = try await Product.SubscriptionInfo.status(
+                    for: subscriptionGroupID.rawValue
+                )
+                // Query the managed group through subscription status: on a
+                // physical device, Xcode StoreKit Testing can omit an active
+                // subscription from currentEntitlements even after relaunch.
+                return transactions.replacingSubscriptionGroup(
+                    subscriptionGroupID,
+                    with: statuses.map { status in
+                        let transaction = Result {
+                            () throws(StoreTransactionVerificationError) in
+                            try LiveTransactionAdapter.snapshot(status.transaction)
+                        }
+                        return (state: status.state, transaction: transaction)
+                    }
                 )
             },
             queryUnfinished: {

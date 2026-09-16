@@ -6,6 +6,151 @@ import Testing
 @Suite("Runtime contract coverage", .timeLimit(.minutes(1)))
 struct RuntimeContractCoverageTests {
     @MainActor
+    @Test("subscription status publishes access when the transaction query omits the purchase")
+    func subscriptionStatusPublishesMissingCurrentEntitlement() async throws {
+        let subscriptions = EntitlementValueSource([])
+        let fixture = TestSourceFixture(currentEntitlements: {
+            CurrentEntitlementQueryResult(
+                snapshots: [],
+                verificationFailures: []
+            ).replacingSubscriptionGroup(
+                TestPlans.id,
+                with: await subscriptions.read().map {
+                    (state: .subscribed, transaction: .success($0))
+                }
+            ).snapshots
+        })
+        let store = TransactionStore(
+            source: fixture.source,
+            subscriptionCatalog: testSubscriptionCatalog
+        )
+        try await store.waitForInitialReadiness()
+        #expect(store.activeEntitlements == [])
+
+        let transaction = makeSubscriptionSnapshot(id: 601, productID: .tier1Monthly)
+        await subscriptions.replace(with: [transaction])
+        let outcome = try await store.process(.verified(makeEnvelope(snapshot: transaction)))
+
+        #expect(outcome == .completed(transaction))
+        #expect(store.activeEntitlements == [.tier1])
+        #expect(store.entitlements?.transactions == [transaction])
+        try await store.close()
+
+        let relaunched = TransactionStore(
+            source: fixture.source,
+            subscriptionCatalog: testSubscriptionCatalog
+        )
+        try await relaunched.waitForInitialReadiness()
+        #expect(relaunched.activeEntitlements == [.tier1])
+        await subscriptions.replace(with: [])
+        _ = try await relaunched.refreshEntitlements()
+        #expect(relaunched.activeEntitlements == [])
+        try await relaunched.close()
+    }
+
+    @MainActor
+    @Test(
+        "subscription renewal state replaces stale transaction-query membership",
+        arguments: [
+            (Product.SubscriptionInfo.RenewalState.subscribed, true),
+            (.inGracePeriod, true),
+            (.expired, false),
+            (.inBillingRetryPeriod, false),
+            (.revoked, false),
+        ]
+    )
+    func subscriptionStatusOwnsManagedGroupMembership(
+        state: Product.SubscriptionInfo.RenewalState,
+        grantsAccess: Bool
+    ) async throws {
+        let transaction = makeSnapshot(
+            id: 602,
+            productID: TestPlans.ProductID.tier1Monthly.rawValue,
+            productType: .autoRenewable,
+            subscriptionGroupID: TestPlans.id.rawValue,
+            expirationDate: Date(timeIntervalSince1970: 1)
+        )
+        let external = makeSnapshot(id: 603, productID: "external.purchase")
+        let result = CurrentEntitlementQueryResult(
+            snapshots: [transaction, external],
+            verificationFailures: []
+        ).replacingSubscriptionGroup(
+            TestPlans.id,
+            with: [(state, .success(transaction))]
+        )
+        let fixture = TestSourceFixture(currentEntitlements: { result.snapshots })
+        let store = TransactionStore(
+            source: fixture.source,
+            subscriptionCatalog: testSubscriptionCatalog
+        )
+        try await store.waitForInitialReadiness()
+
+        #expect(store.isEntitled(to: .tier1) == grantsAccess)
+        #expect(store.entitlements?.transactions.contains(external) == true)
+        #expect(store.entitlements?.transactions.filter { $0.id == transaction.id }.count == (grantsAccess ? 1 : 0))
+        try await store.close()
+    }
+
+    @MainActor
+    @Test("subscription verification failure cannot reuse a raw transaction to grant access")
+    func subscriptionVerificationFailureDoesNotReuseTransactionQuery() async throws {
+        let unverified = makeSubscriptionSnapshot(id: 604, productID: .tier2Monthly)
+        let verified = makeSubscriptionSnapshot(id: 605, productID: .tier1Yearly)
+        let result = CurrentEntitlementQueryResult(
+            snapshots: [unverified],
+            verificationFailures: []
+        ).replacingSubscriptionGroup(
+            TestPlans.id,
+            with: [
+                (.subscribed, .failure(StoreTransactionVerificationError(underlyingError: TestFailure()))),
+                (.subscribed, .success(verified)),
+            ]
+        )
+        let fixture = TestSourceFixture(
+            currentEntitlements: { result.snapshots },
+            currentEntitlementVerificationFailures: { result.verificationFailures }
+        )
+        let store = TransactionStore(
+            source: fixture.source,
+            subscriptionCatalog: testSubscriptionCatalog
+        )
+        try await store.waitForInitialReadiness()
+
+        #expect(result.verificationFailures.count == 1)
+        #expect(store.activeEntitlements == [.tier1])
+        #expect(store.entitlements?.transactions == [verified])
+        try await store.close()
+    }
+
+    @MainActor
+    @Test("status-derived undeclared subscriptions preserve the default unrecognized policy")
+    func subscriptionStatusPreservesUnrecognizedPolicy() async throws {
+        let unknown = makeSnapshot(
+            id: 606,
+            productID: "test.subscription.future.monthly",
+            productType: .autoRenewable,
+            subscriptionGroupID: TestPlans.id.rawValue
+        )
+        let result = CurrentEntitlementQueryResult(
+            snapshots: [],
+            verificationFailures: []
+        ).replacingSubscriptionGroup(
+            TestPlans.id,
+            with: [(.subscribed, .success(unknown))]
+        )
+        let fixture = TestSourceFixture(currentEntitlements: { result.snapshots })
+        let store = TransactionStore(
+            source: fixture.source,
+            subscriptionCatalog: testSubscriptionCatalog
+        )
+        try await store.waitForInitialReadiness()
+
+        #expect(store.activeEntitlements == [])
+        #expect(store.entitlements?.transactions == [unknown])
+        try await store.close()
+    }
+
+    @MainActor
     @Test("subscription status waits for readiness and close drains its publication")
     func subscriptionStatusReadinessAndCloseDrain() async throws {
         let query = ControlledEntitlementQuery()

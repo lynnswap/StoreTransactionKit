@@ -30,7 +30,7 @@ package enum LiveTransactionAdapter {
 
     package static func snapshot(
         _ result: VerificationResult<Transaction>
-    ) throws -> StoreTransactionSnapshot {
+    ) throws(StoreTransactionVerificationError) -> StoreTransactionSnapshot {
         switch result {
         case .verified(let transaction):
             return snapshot(

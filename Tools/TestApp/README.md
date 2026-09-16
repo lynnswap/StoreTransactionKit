@@ -80,6 +80,11 @@ GitHub macOS 26 image. CI also cross-builds the app host and test bundle for
 tvOS, watchOS, and visionOS simulators. The same runtime suite is validated
 locally with Xcode 26.5 on iOS 18.6 to cover the supported iOS 18 line.
 
+With Xcode 27.0 on the iOS 27.0 Simulator, injecting a subscription-status
+network error returns an empty status array instead of throwing. The runtime's
+thrown-query failure contract is covered by deterministic source tests; actual
+subscription-status network failures remain a Sandbox validation boundary.
+
 Local StoreKit testing doesn't validate App Store Connect configuration,
 App Store Server Notifications, cross-device propagation, Family Sharing or
 Ask to Buy with real accounts, offer eligibility, or the production purchase

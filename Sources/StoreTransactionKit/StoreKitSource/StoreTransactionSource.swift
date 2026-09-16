@@ -17,6 +17,32 @@ package struct CurrentEntitlementQueryResult: Sendable {
         self.snapshots = snapshots
         self.verificationFailures = verificationFailures
     }
+
+    package func replacingSubscriptionGroup(
+        _ groupID: SubscriptionGroupID,
+        with statuses: [(
+            state: Product.SubscriptionInfo.RenewalState,
+            transaction: Result<StoreTransactionSnapshot, StoreTransactionVerificationError>
+        )]
+    ) -> Self {
+        var snapshots = snapshots.filter {
+            $0.subscriptionGroupID != groupID.rawValue
+        }
+        var verificationFailures = verificationFailures
+        for status in statuses
+        where status.state == .subscribed || status.state == .inGracePeriod {
+            switch status.transaction {
+            case .success(let transaction):
+                snapshots.append(transaction)
+            case .failure(let error):
+                verificationFailures.append(error)
+            }
+        }
+        return Self(
+            snapshots: snapshots,
+            verificationFailures: verificationFailures
+        )
+    }
 }
 
 package struct StoreTransactionSource: Sendable {
