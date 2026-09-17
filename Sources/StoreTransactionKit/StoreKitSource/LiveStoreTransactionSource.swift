@@ -22,12 +22,13 @@ package extension StoreTransactionSource {
             },
             currentEntitlements: {
                 var snapshots: [StoreTransactionSnapshot] = []
-                var verificationFailures: [StoreTransactionVerificationError] = []
+                var verificationFailures: [CurrentEntitlementQueryResult.VerificationFailure] = []
                 for await result in Transaction.currentEntitlements {
-                    do {
-                        snapshots.append(try LiveTransactionAdapter.snapshot(result))
-                    } catch let error as StoreTransactionVerificationError {
-                        verificationFailures.append(error)
+                    switch LiveTransactionAdapter.entitlement(result) {
+                    case .success(let snapshot):
+                        snapshots.append(snapshot)
+                    case .failure(let failure):
+                        verificationFailures.append(failure)
                     }
                 }
                 let transactions = CurrentEntitlementQueryResult(
@@ -43,11 +44,7 @@ package extension StoreTransactionSource {
                 return transactions.replacingSubscriptionGroup(
                     subscriptionGroupID,
                     with: statuses.map { status in
-                        let transaction = Result {
-                            () throws(StoreTransactionVerificationError) in
-                            try LiveTransactionAdapter.snapshot(status.transaction)
-                        }
-                        return (state: status.state, transaction: transaction)
+                        (state: status.state, transaction: LiveTransactionAdapter.entitlement(status.transaction))
                     }
                 )
             },

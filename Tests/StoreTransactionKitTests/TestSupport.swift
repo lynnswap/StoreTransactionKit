@@ -380,7 +380,7 @@ struct TestSourceFixture: Sendable {
             -> [StoreTransactionSnapshot] = { [] },
         currentEntitlementVerificationFailures:
             @escaping @Sendable () async
-            -> [StoreTransactionVerificationError] = { [] },
+            -> [CurrentEntitlementQueryResult.VerificationFailure] = { [] },
         queryUnfinished:
             @escaping @Sendable () async
             -> [StoreTransactionDelivery] = { [] },

@@ -42,6 +42,21 @@ package enum LiveTransactionAdapter {
         }
     }
 
+    package static func entitlement(
+        _ result: VerificationResult<Transaction>
+    ) -> Result<StoreTransactionSnapshot, CurrentEntitlementQueryResult.VerificationFailure> {
+        do {
+            return .success(try snapshot(result))
+        } catch {
+            return .failure(
+                .init(
+                    revision: Data(result.jwsRepresentation.utf8),
+                    error: error
+                )
+            )
+        }
+    }
+
     private static func snapshot(
         _ transaction: Transaction,
         jwsRepresentation: String

@@ -102,7 +102,14 @@ struct RuntimeContractCoverageTests {
         ).replacingSubscriptionGroup(
             TestPlans.id,
             with: [
-                (.subscribed, .failure(StoreTransactionVerificationError(underlyingError: TestFailure()))),
+                (
+                    .subscribed,
+                    .failure(
+                        .init(
+                            revision: Data("unverified-status".utf8),
+                            error: StoreTransactionVerificationError(underlyingError: TestFailure())
+                        ))
+                ),
                 (.subscribed, .success(verified)),
             ]
         )

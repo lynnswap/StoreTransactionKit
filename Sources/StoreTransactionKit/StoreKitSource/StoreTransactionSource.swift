@@ -7,22 +7,30 @@ package enum StoreTransactionDelivery: Sendable {
 }
 
 package struct CurrentEntitlementQueryResult: Sendable {
+    package struct VerificationFailure: Error, Sendable {
+        package let revision: Data
+        package let error: StoreTransactionVerificationError
+    }
+
     package let snapshots: [StoreTransactionSnapshot]
-    package let verificationFailures: [StoreTransactionVerificationError]
+    package let verificationFailures: [VerificationFailure]
 
     package init(
         snapshots: [StoreTransactionSnapshot],
-        verificationFailures: [StoreTransactionVerificationError]
+        verificationFailures: [VerificationFailure]
     ) {
         self.snapshots = snapshots
-        self.verificationFailures = verificationFailures
+        var revisions: Set<Data> = []
+        self.verificationFailures = verificationFailures.filter {
+            revisions.insert($0.revision).inserted
+        }
     }
 
     package func replacingSubscriptionGroup(
         _ groupID: SubscriptionGroupID,
         with statuses: [(
             state: Product.SubscriptionInfo.RenewalState,
-            transaction: Result<StoreTransactionSnapshot, StoreTransactionVerificationError>
+            transaction: Result<StoreTransactionSnapshot, VerificationFailure>
         )]
     ) -> Self {
         var snapshots = snapshots.filter {
