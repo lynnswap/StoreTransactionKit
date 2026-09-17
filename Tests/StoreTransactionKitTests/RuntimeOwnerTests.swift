@@ -106,8 +106,9 @@ struct RuntimeOwnerTests {
             currentEntitlements: { [snapshot] },
             currentEntitlementVerificationFailures: {
                 [
-                    StoreTransactionVerificationError(
-                        underlyingError: TestFailure()
+                    CurrentEntitlementQueryResult.VerificationFailure(
+                        revision: Data("unverified-remainder".utf8),
+                        error: StoreTransactionVerificationError(underlyingError: TestFailure())
                     )
                 ]
             }
@@ -126,6 +127,75 @@ struct RuntimeOwnerTests {
         #expect(store.entitlements?.transactions == [snapshot])
         #expect(store.activeEntitlements == [.tier1])
         try await store.close()
+    }
+
+    @MainActor
+    @Test("entitlement verification failures report each signed revision once per refresh")
+    func entitlementVerificationFailuresDeduplicateByRevision() async throws {
+        enum Cause: Error, Sendable, Equatable {
+            case shared
+            case distinct
+        }
+        let snapshot = makeSubscriptionSnapshot(
+            id: 23,
+            productID: .tier1Monthly
+        )
+        let result = CurrentEntitlementQueryResult(
+            snapshots: [],
+            verificationFailures: [
+                .init(
+                    revision: Data("shared-jws".utf8),
+                    error: StoreTransactionVerificationError(underlyingError: Cause.shared)
+                )
+            ]
+        ).replacingSubscriptionGroup(
+            TestPlans.id,
+            with: [
+                (
+                    state: .subscribed,
+                    transaction: .failure(
+                        .init(
+                            revision: Data("shared-jws".utf8),
+                            error: StoreTransactionVerificationError(underlyingError: Cause.shared)
+                        )
+                    )
+                ),
+                (
+                    state: .inGracePeriod,
+                    transaction: .failure(
+                        .init(
+                            revision: Data("distinct-jws".utf8),
+                            error: StoreTransactionVerificationError(underlyingError: Cause.distinct)
+                        )
+                    )
+                ),
+                (state: .subscribed, transaction: .success(snapshot)),
+            ]
+        )
+        let delegate = FailureRecordingDelegate()
+        let fixture = TestSourceFixture(
+            currentEntitlements: { result.snapshots },
+            currentEntitlementVerificationFailures: { result.verificationFailures }
+        )
+        let store = TransactionStore(
+            source: fixture.source,
+            subscriptionCatalog: testSubscriptionCatalog,
+            delegate: delegate
+        )
+
+        try await store.waitForInitialReadiness()
+        #expect(store.activeEntitlements == [.tier1])
+        try await store.refreshEntitlements()
+        try await store.close()
+
+        let failures = await delegate.failures()
+        #expect(failures.count == 4)
+        #expect(failures.allSatisfy { $0.source == .currentEntitlementVerification })
+        #expect(
+            failures.compactMap {
+                ($0.underlyingError as? StoreTransactionVerificationError)?.underlyingError as? Cause
+            } == [.shared, .distinct, .shared, .distinct]
+        )
     }
 
     @MainActor

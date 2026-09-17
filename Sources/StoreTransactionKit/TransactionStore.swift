@@ -107,7 +107,7 @@ where Entitlement: Hashable & Sendable {
         let liveLease = LiveTransactionStoreLease.acquire()
         let lifecycle = TransactionStoreLifecycle(liveLease: liveLease)
         self.init(
-            source: .live,
+            source: .live(subscriptionGroupID: subscriptionCatalog.subscriptionGroupID),
             lifecycle: lifecycle,
             backendKind: .live,
             subscriptionCatalog: subscriptionCatalog,

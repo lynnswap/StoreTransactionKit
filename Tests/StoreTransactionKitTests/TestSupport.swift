@@ -279,6 +279,7 @@ func makeSnapshot(
     purchaseDate: Date? = nil,
     signedDate: Date? = nil,
     jws: String? = nil,
+    expirationDate: Date? = nil,
     revocationDate: Date? = nil,
     isUpgraded: Bool = false
 ) -> StoreTransactionSnapshot {
@@ -297,7 +298,7 @@ func makeSnapshot(
         currency: nil,
         purchaseDate: purchaseDate,
         originalPurchaseDate: purchaseDate,
-        expirationDate: nil,
+        expirationDate: expirationDate,
         revocationDate: revocationDate,
         revocationReason: nil,
         purchasedQuantity: 1,
@@ -379,7 +380,7 @@ struct TestSourceFixture: Sendable {
             -> [StoreTransactionSnapshot] = { [] },
         currentEntitlementVerificationFailures:
             @escaping @Sendable () async
-            -> [StoreTransactionVerificationError] = { [] },
+            -> [CurrentEntitlementQueryResult.VerificationFailure] = { [] },
         queryUnfinished:
             @escaping @Sendable () async
             -> [StoreTransactionDelivery] = { [] },

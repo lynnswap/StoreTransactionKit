@@ -30,7 +30,7 @@ package enum LiveTransactionAdapter {
 
     package static func snapshot(
         _ result: VerificationResult<Transaction>
-    ) throws -> StoreTransactionSnapshot {
+    ) throws(StoreTransactionVerificationError) -> StoreTransactionSnapshot {
         switch result {
         case .verified(let transaction):
             return snapshot(
@@ -39,6 +39,21 @@ package enum LiveTransactionAdapter {
             )
         case .unverified(_, let error):
             throw StoreTransactionVerificationError(underlyingError: error)
+        }
+    }
+
+    package static func entitlement(
+        _ result: VerificationResult<Transaction>
+    ) -> Result<StoreTransactionSnapshot, CurrentEntitlementQueryResult.VerificationFailure> {
+        do {
+            return .success(try snapshot(result))
+        } catch {
+            return .failure(
+                .init(
+                    revision: Data(result.jwsRepresentation.utf8),
+                    error: error
+                )
+            )
         }
     }
 

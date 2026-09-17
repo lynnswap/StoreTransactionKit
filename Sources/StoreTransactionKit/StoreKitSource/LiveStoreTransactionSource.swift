@@ -1,7 +1,7 @@
 import StoreKit
 
 package extension StoreTransactionSource {
-    static var live: StoreTransactionSource {
+    static func live(subscriptionGroupID: SubscriptionGroupID) -> StoreTransactionSource {
         StoreTransactionSource(
             runUpdates: { beginIteration, consume in
                 var iterator = Transaction.updates.makeAsyncIterator()
@@ -22,17 +22,30 @@ package extension StoreTransactionSource {
             },
             currentEntitlements: {
                 var snapshots: [StoreTransactionSnapshot] = []
-                var verificationFailures: [StoreTransactionVerificationError] = []
+                var verificationFailures: [CurrentEntitlementQueryResult.VerificationFailure] = []
                 for await result in Transaction.currentEntitlements {
-                    do {
-                        snapshots.append(try LiveTransactionAdapter.snapshot(result))
-                    } catch let error as StoreTransactionVerificationError {
-                        verificationFailures.append(error)
+                    switch LiveTransactionAdapter.entitlement(result) {
+                    case .success(let snapshot):
+                        snapshots.append(snapshot)
+                    case .failure(let failure):
+                        verificationFailures.append(failure)
                     }
                 }
-                return CurrentEntitlementQueryResult(
+                let transactions = CurrentEntitlementQueryResult(
                     snapshots: snapshots,
                     verificationFailures: verificationFailures
+                )
+                let statuses = try await Product.SubscriptionInfo.status(
+                    for: subscriptionGroupID.rawValue
+                )
+                // Query the managed group through subscription status: on a
+                // physical device, Xcode StoreKit Testing can omit an active
+                // subscription from currentEntitlements even after relaunch.
+                return transactions.replacingSubscriptionGroup(
+                    subscriptionGroupID,
+                    with: statuses.map { status in
+                        (state: status.state, transaction: LiveTransactionAdapter.entitlement(status.transaction))
+                    }
                 )
             },
             queryUnfinished: {

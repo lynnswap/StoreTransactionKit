@@ -77,7 +77,7 @@ package final class CurrentEntitlementReconciler: Sendable {
             observedRevisions: &observedVerificationRevisions,
             diagnostics: &diagnostics
         )
-        var precedingCurrentVerificationFailures: [StoreTransactionVerificationError] = []
+        var precedingCurrentVerificationFailures: [CurrentEntitlementQueryResult.VerificationFailure] = []
 
         while true {
             while !batch.acceptedTransactions.isEmpty {
@@ -295,7 +295,7 @@ package final class CurrentEntitlementReconciler: Sendable {
     }
 
     private func appendCurrentEntitlementVerificationFailures(
-        _ verificationFailures: [StoreTransactionVerificationError],
+        _ verificationFailures: [CurrentEntitlementQueryResult.VerificationFailure],
         to diagnostics: inout [StoreTransactionBackgroundFailure]
     ) {
         for failure in verificationFailures {
@@ -304,7 +304,7 @@ package final class CurrentEntitlementReconciler: Sendable {
                     source: .currentEntitlementVerification,
                     transactionID: nil,
                     productID: nil,
-                    underlyingError: failure
+                    underlyingError: failure.error
                 )
             )
         }
