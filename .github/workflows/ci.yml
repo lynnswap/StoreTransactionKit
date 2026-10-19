@@ -180,23 +180,42 @@ jobs:
           xcodebuild -version
           swift --version
 
-      - name: Select iOS Simulator
+      - name: Start the iOS Simulator before building
+        timeout-minutes: 2
         run: |
-          simulator_id="$(xcrun simctl list devices available --json | ruby -rjson -e '
+          selection="$(xcrun simctl list devices available --json | ruby -rjson -e '
             runtimes = JSON.parse(STDIN.read).fetch("devices")
-            _, devices = runtimes.find { |name, _| name.end_with?(".iOS-26-2") }
+            runtime, devices = runtimes.find { |name, _| name.end_with?(".iOS-26-2") }
             abort("The iOS 26.2 Simulator runtime is required for StoreKit tests") unless devices
             device = devices.find { |candidate| candidate["isAvailable"] && candidate["name"].start_with?("iPhone") }
             abort("No available iPhone with iOS 26.2 found") unless device
-            puts device.fetch("udid")
+            puts [device.fetch("deviceTypeIdentifier"), runtime].join(" ")
           ')"
+          read -r device_type runtime <<< "$selection"
+          simulator_id="$(xcrun simctl create "StoreTransactionKit CI" "$device_type" "$runtime")"
           echo "SIMULATOR_ID=${simulator_id}" >> "$GITHUB_ENV"
+          xcrun simctl boot "$simulator_id"
+
+      - name: Build iOS package tests
+        run: |
+          xcodebuild build-for-testing \
+            -scheme StoreTransactionKit-Package \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_ID}" \
+            -derivedDataPath "$RUNNER_TEMP/package-tests" \
+            -parallel-testing-enabled NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Wait for the iOS Simulator
+        timeout-minutes: 5
+        run: xcrun simctl bootstatus "$SIMULATOR_ID" -b
 
       - name: Run iOS Simulator tests
         run: |
-          xcodebuild test \
+          xcodebuild test-without-building \
             -scheme StoreTransactionKit-Package \
             -destination "platform=iOS Simulator,id=${SIMULATOR_ID}" \
+            -derivedDataPath "$RUNNER_TEMP/package-tests" \
             -parallel-testing-enabled NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
@@ -210,3 +229,8 @@ jobs:
             -parallel-testing-enabled NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
+
+      - name: Delete the test Simulator
+        if: always() && env.SIMULATOR_ID != ''
+        timeout-minutes: 2
+        run: xcrun simctl delete "$SIMULATOR_ID"
